@@ -235,6 +235,21 @@ def _coerce_saved_setting(value: str, caster):
     return caster(value)
 
 
+def _request_client_id(request: GenerateRequest) -> str | None:
+    client_id = request.client_id.strip()
+    return client_id or None
+
+
+def _job_client_id(job_id: str) -> str | None:
+    job = generation_service.get_job(job_id) or {}
+    client_id = str(job.get("client_id") or "").strip()
+    return client_id or None
+
+
+async def _broadcast_job_event(job_id: str, message: dict) -> None:
+    await generation_ws_manager.broadcast(message, client_id=_job_client_id(job_id))
+
+
 async def _apply_saved_generation_defaults(request: GenerateRequest) -> dict[str, str]:
     """Apply DB/profile-backed defaults to omitted generation request fields.
 
@@ -299,7 +314,7 @@ async def submit_generation(request: GenerateRequest) -> GenerateResponse:
                 },
             )
 
-    job_id = svc.create_job()
+    job_id = svc.create_job(client_id=_request_client_id(request))
 
     asyncio.create_task(_run_generation(job_id, request))
 
@@ -317,14 +332,14 @@ async def _run_generation(job_id: str, request: GenerateRequest) -> None:
     # Check cancellation before waiting for GPU
     if svc.is_cancelled(job_id):
         logger.info(f"Job {job_id} cancelled before GPU acquire")
-        await generation_ws_manager.broadcast({
+        await _broadcast_job_event(job_id, {
             "type": "failed", "job_id": job_id, "error": "Cancelled by user",
         })
         return
 
     current_holder = gpu_lock.holder
     if use_local_gpu_lock and gpu_lock.is_locked:
-        await generation_ws_manager.broadcast({
+        await _broadcast_job_event(job_id, {
             "type": "progress",
             "job_id": job_id,
             "progress": 0.0,
@@ -343,14 +358,14 @@ async def _run_generation(job_id: str, request: GenerateRequest) -> None:
         logger.info(f"Job {job_id} cancelled after GPU acquire")
         if use_local_gpu_lock:
             await gpu_lock.release("generation")
-        await generation_ws_manager.broadcast({
+        await _broadcast_job_event(job_id, {
             "type": "failed", "job_id": job_id, "error": "Cancelled by user",
         })
         return
 
     started_at = datetime.now(timezone.utc)
     history_id = str(uuid.uuid4())
-    params_dict = request.model_dump()
+    params_dict = request.model_dump(exclude={"client_id"})
     # Force English vocals for all generation requests.
     params_dict["vocal_language"] = "en"
 
@@ -371,6 +386,13 @@ async def _run_generation(job_id: str, request: GenerateRequest) -> None:
             (time.perf_counter() - lyrics_started) * 1000,
             2,
         )
+        prepared_public_params = svc.public_params(params_dict)
+        svc.update_job(job_id, prepared_params=prepared_public_params)
+        await _broadcast_job_event(job_id, {
+            "type": "prepared",
+            "job_id": job_id,
+            "params": prepared_public_params,
+        })
     except Exception as e:
         logger.warning(f"Generation lyrics pipeline failed: {e}")
         svc.update_job(
@@ -382,7 +404,7 @@ async def _run_generation(job_id: str, request: GenerateRequest) -> None:
         )
         if use_local_gpu_lock:
             await gpu_lock.release("generation")
-        await generation_ws_manager.broadcast({
+        await _broadcast_job_event(job_id, {
             "type": "failed",
             "job_id": job_id,
             "error": str(e),
@@ -412,20 +434,20 @@ async def _run_generation(job_id: str, request: GenerateRequest) -> None:
     }
     progress_msg["step"] = 0
     progress_msg["total_steps"] = request.inference_steps
-    await generation_ws_manager.broadcast(progress_msg)
+    await _broadcast_job_event(job_id, progress_msg)
 
     # Check cancellation before generation
     if svc.is_cancelled(job_id):
         logger.info(f"Job {job_id} cancelled before generation")
         if use_local_gpu_lock:
             await gpu_lock.release("generation")
-        await generation_ws_manager.broadcast({
+        await _broadcast_job_event(job_id, {
             "type": "failed", "job_id": job_id, "error": "Cancelled by user",
         })
         return
 
     svc.update_job(job_id, progress=0.02, stage="Starting generation...")
-    await generation_ws_manager.broadcast({
+    await _broadcast_job_event(job_id, {
         "type": "progress",
         "job_id": job_id,
         "progress": 0.02,
@@ -469,7 +491,7 @@ async def _run_generation(job_id: str, request: GenerateRequest) -> None:
         last_broadcast_time = now
         loop.call_soon_threadsafe(
             asyncio.ensure_future,
-            generation_ws_manager.broadcast({
+            _broadcast_job_event(job_id, {
                 "type": "progress",
                 "job_id": job_id,
                 "progress": progress_value,
@@ -579,14 +601,14 @@ async def _run_generation(job_id: str, request: GenerateRequest) -> None:
                 # Send the title BEFORE completed so the frontend has it when
                 # the auto-save side effects run.
                 if generated_title is not None:
-                    await generation_ws_manager.broadcast({
+                    await _broadcast_job_event(job_id, {
                         "type": "title",
                         "job_id": job_id,
                         "history_id": history_id,
                         "title": generated_title,
                     })
 
-                await generation_ws_manager.broadcast({
+                await _broadcast_job_event(job_id, {
                     "type": "completed",
                     "job_id": job_id,
                     "history_id": history_id,
@@ -612,7 +634,7 @@ async def _run_generation(job_id: str, request: GenerateRequest) -> None:
                 except Exception as e:
                     logger.warning(f"Failed to update generation history: {e}")
 
-                await generation_ws_manager.broadcast({
+                await _broadcast_job_event(job_id, {
                     "type": "failed",
                     "job_id": job_id,
                     "error": error,
@@ -642,7 +664,7 @@ async def _run_generation(job_id: str, request: GenerateRequest) -> None:
             except Exception as he:
                 logger.warning(f"Failed to update generation history: {he}")
 
-            await generation_ws_manager.broadcast({
+            await _broadcast_job_event(job_id, {
                 "type": "failed",
                 "job_id": job_id,
                 "error": "Cancelled by user",
@@ -668,7 +690,7 @@ async def _run_generation(job_id: str, request: GenerateRequest) -> None:
             except Exception as he:
                 logger.warning(f"Failed to update generation history: {he}")
 
-            await generation_ws_manager.broadcast({
+            await _broadcast_job_event(job_id, {
                 "type": "failed",
                 "job_id": job_id,
                 "error": str(e),
@@ -817,7 +839,8 @@ ws_router = APIRouter(tags=["websocket"])
 
 @ws_router.websocket("/ws/generate")
 async def websocket_generation(websocket: WebSocket) -> None:
-    await generation_ws_manager.connect(websocket)
+    client_id = websocket.query_params.get("client_id") or None
+    await generation_ws_manager.connect(websocket, client_id=client_id)
     try:
         while True:
             await websocket.receive_text()

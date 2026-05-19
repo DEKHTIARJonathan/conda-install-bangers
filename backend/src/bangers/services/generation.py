@@ -173,7 +173,7 @@ class GenerationService:
 
         return await self.backend.generate(normalized_params, progress_callback=progress_callback)
 
-    def create_job(self) -> str:
+    def create_job(self, client_id: str | None = None) -> str:
         job_id = str(uuid.uuid4())
         self._jobs[job_id] = {
             "status": "queued",
@@ -183,6 +183,7 @@ class GenerationService:
             "error": None,
             "timings": {},
             "created_at": time.time(),
+            "client_id": client_id or "",
         }
         return job_id
 

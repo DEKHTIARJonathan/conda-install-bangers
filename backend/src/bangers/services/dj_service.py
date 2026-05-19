@@ -186,7 +186,7 @@ class DJService:
         return True
 
     async def send_message(
-        self, conv_id: str, user_content: str
+        self, conv_id: str, user_content: str, client_id: str | None = None
     ) -> dict[str, Any]:
         """Process a user message through the LLM and optionally trigger generation."""
         db = await get_db()
@@ -386,7 +386,10 @@ class DJService:
                 from bangers.services.generation import generation_service
 
                 if generation_service.backend_ready or settings.delegates_to_workers:
-                    job_id = generation_service.create_job()
+                    if client_id:
+                        job_id = generation_service.create_job(client_id=client_id)
+                    else:
+                        job_id = generation_service.create_job()
                     generation_job_id = job_id
 
                     # Fire and forget generation
@@ -447,8 +450,23 @@ class DJService:
 
         use_local_gpu_lock = not settings.delegates_to_workers
 
+        def _client_id() -> str | None:
+            get_job = getattr(generation_service, "get_job", None)
+            if not callable(get_job):
+                return None
+            job = get_job(job_id) or {}
+            value = str(job.get("client_id") or "").strip()
+            return value or None
+
+        async def _broadcast(message: dict[str, Any]) -> None:
+            client_id = _client_id()
+            if client_id:
+                await generation_ws_manager.broadcast(message, client_id=client_id)
+            else:
+                await generation_ws_manager.broadcast(message)
+
         if use_local_gpu_lock and gpu_lock.is_locked:
-            await generation_ws_manager.broadcast({
+            await _broadcast({
                 "type": "progress",
                 "job_id": job_id,
                 "progress": 0.0,
@@ -565,14 +583,14 @@ class DJService:
                 await db.commit()
 
                 if generated_title is not None:
-                    await generation_ws_manager.broadcast({
+                    await _broadcast({
                         "type": "title",
                         "job_id": job_id,
                         "history_id": history_id,
                         "title": generated_title,
                     })
 
-                await generation_ws_manager.broadcast({
+                await _broadcast({
                     "type": "completed",
                     "job_id": job_id,
                     "history_id": history_id,
@@ -581,7 +599,7 @@ class DJService:
             else:
                 error = result.get("error", "Generation failed")
                 generation_service.update_job(job_id, status="failed", error=error)
-                await generation_ws_manager.broadcast({
+                await _broadcast({
                     "type": "failed",
                     "job_id": job_id,
                     "error": error,
@@ -596,7 +614,7 @@ class DJService:
         except Exception as e:
             logger.exception(f"DJ generation {job_id} failed")
             generation_service.update_job(job_id, status="failed", error=str(e))
-            await generation_ws_manager.broadcast({
+            await _broadcast({
                 "type": "failed",
                 "job_id": job_id,
                 "error": str(e),

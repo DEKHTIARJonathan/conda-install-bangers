@@ -24,6 +24,46 @@ export function unregisterAutoGenSubmit() {
   _autoGenSubmitFn = undefined;
 }
 
+export function applyPreparedParamsToSubmittedCustomJob(
+  jobId: string,
+  params: Record<string, unknown>,
+): boolean {
+  const store = useGenerationStore.getState();
+  const matchedJob = store.activeJobs.find((j) => j.jobId === jobId);
+  const submitted = matchedJob?.submittedCustomForm;
+  if (!submitted) return false;
+
+  const current = store.customForm;
+  if (
+    current.caption !== submitted.caption ||
+    current.lyrics !== submitted.lyrics ||
+    current.instrumental !== submitted.instrumental
+  ) {
+    return false;
+  }
+
+  const nextLyrics =
+    typeof params.lyrics === "string" ? params.lyrics : current.lyrics;
+  const nextCaption =
+    typeof params.caption === "string" ? params.caption : current.caption;
+  const nextKeyscale =
+    typeof params.keyscale === "string" ? params.keyscale : current.keyscale;
+  const nextTimesignature =
+    typeof params.timesignature === "string"
+      ? params.timesignature
+      : current.timesignature;
+  const nextBpm = typeof params.bpm === "number" ? params.bpm : current.bpm;
+
+  store.updateCustomForm({
+    caption: nextCaption,
+    lyrics: nextLyrics,
+    keyscale: nextKeyscale,
+    timesignature: nextTimesignature,
+    bpm: nextBpm,
+  });
+  return true;
+}
+
 /**
  * Global WebSocket hook for generation progress.
  * Mount in AppShell so it persists across tab navigation.
@@ -41,7 +81,7 @@ export function useGenerationWs() {
       const { job_id, type } = msg;
       if (!job_id) return;
 
-      const store = useGenerationStore.getState();
+      let store = useGenerationStore.getState();
 
       // Auto-swap: WS messages can arrive with the server job_id before the
       // HTTP response triggers swapJobId. If we see an unknown job_id but have
@@ -50,6 +90,7 @@ export function useGenerationWs() {
         const queued = store.activeJobs.find((j) => j.status === "queued");
         if (queued) {
           store.swapJobId(queued.jobId, job_id);
+          store = useGenerationStore.getState();
         }
       }
 
@@ -60,6 +101,8 @@ export function useGenerationWs() {
           store.setJobTitle(job_id, title);
           store.updateJob(job_id, { historyId });
         }
+      } else if (type === "prepared") {
+        applyPreparedParamsToSubmittedCustomJob(job_id, msg.params ?? {});
       } else if (type === "progress") {
         // Ignore progress updates for jobs being cancelled
         const progressJob = store.activeJobs.find((j) => j.jobId === job_id);

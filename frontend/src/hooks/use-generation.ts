@@ -237,6 +237,7 @@ export function useGeneration() {
       historyId: null,
       savedVariants: [],
       generatedTitle: null,
+      submittedCustomForm: activeMode === "Custom" ? { ...customForm } : undefined,
     });
 
     try {
@@ -334,6 +335,7 @@ export function useGeneration() {
   }, [
     activeMode,
     simpleForm,
+    customForm,
     advancedSettings,
     buildRequest,
     addJob,

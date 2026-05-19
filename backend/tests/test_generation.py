@@ -203,6 +203,37 @@ async def test_custom_generation_reports_code_of_conduct_rejected_lyrics(client,
 
 
 @pytest.mark.asyncio
+async def test_generation_client_id_owns_job_but_not_backend_params(client):
+    from bangers.services.generation import generation_service
+
+    backend = _ReadyGenerationBackend()
+    generation_service.backend = backend
+
+    resp = await client.post("/api/generate", json={
+        "task_type": "text2music",
+        "caption": "instrumental test song",
+        "instrumental": True,
+        "client_id": "browser-session-1",
+        "inference_steps": 1,
+    })
+
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    for _ in range(50):
+        job_resp = await client.get(f"/api/generate/{job_id}")
+        body = job_resp.json()
+        if body["status"] in {"completed", "failed"}:
+            break
+        await asyncio.sleep(0.01)
+
+    assert body["status"] == "completed", body
+    assert generation_service.get_job(job_id)["client_id"] == "browser-session-1"
+    assert backend.last_generate_params is not None
+    assert "client_id" not in backend.last_generate_params
+
+
+@pytest.mark.asyncio
 async def test_get_nonexistent_job(client):
     resp = await client.get("/api/generate/nonexistent-id")
     assert resp.status_code == 404

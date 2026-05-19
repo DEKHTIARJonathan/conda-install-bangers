@@ -96,6 +96,7 @@ export interface GenerateRequest {
   quality_profile?: string;
   spec_source?: string;
   source_prompt?: string;
+  client_id?: string;
 }
 
 export interface GenerateResponse {
@@ -122,12 +123,13 @@ export interface AudioResult {
 }
 
 export interface WsProgressMessage {
-  type: "progress" | "completed" | "failed" | "title";
+  type: "progress" | "prepared" | "completed" | "failed" | "title";
   job_id: string;
   progress?: number;
   stage?: string;
   step?: number;
   total_steps?: number;
+  params?: Record<string, unknown>;
   results?: AudioResult[];
   error?: string;
   history_id?: string;

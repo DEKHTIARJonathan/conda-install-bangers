@@ -73,6 +73,11 @@ class GenerateRequest(BaseModel):
     spec_source: str = Field(default="", max_length=200)
     source_prompt: str = Field(default="", max_length=4000)
 
+    # Browser session that owns this job's live progress stream. This is not
+    # authentication; it only prevents concurrent clients from attaching their
+    # UI state to each other's jobs.
+    client_id: str = Field(default="", max_length=128)
+
 
 class GenerateResponse(BaseModel):
     job_id: str
