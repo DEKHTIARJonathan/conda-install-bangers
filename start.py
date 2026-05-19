@@ -480,6 +480,19 @@ def _detect_lan_ip() -> str | None:
         sock.close()
 
 
+def _detect_lan_hostnames() -> list[str]:
+    """Return stable hostnames worth putting in the dev cert SAN list."""
+    names = [socket.gethostname(), socket.getfqdn()]
+    result: list[str] = []
+    seen = {"", "localhost", "localhost.localdomain"}
+    for name in names:
+        name = name.strip()
+        if name and name not in seen:
+            result.append(name)
+            seen.add(name)
+    return result
+
+
 def _has_nvidia_gpu() -> bool:
     """Check if an NVIDIA GPU is available (Windows/Linux)."""
     if shutil.which("nvidia-smi") is None:
@@ -1145,11 +1158,13 @@ def main() -> None:
     worker_urls = _merge_worker_urls(local_worker_specs, configured_worker_urls)
     remote_worker_specs = _remote_worker_specs(runtime_env, configured_worker_urls)
     lan_ip = _detect_lan_ip()
-    extra_sans = [lan_ip] if lan_ip else []
+    lan_hostnames = _detect_lan_hostnames()
+    extra_sans = [*lan_hostnames, *([lan_ip] if lan_ip else [])]
     cert_path, key_path = ensure_dev_cert(extra_sans)
 
     local_url = f"https://localhost:{FRONTEND_PORT}"
     lan_url = f"https://{lan_ip}:{FRONTEND_PORT}" if lan_ip else None
+    hostname_urls = [f"https://{name}:{FRONTEND_PORT}" for name in lan_hostnames]
 
     if local_worker_specs:
         log(
@@ -1169,6 +1184,8 @@ def main() -> None:
 
     log(f"Backend  HTTPS on {CYAN}https://localhost:{backend_port}{RESET}")
     log(f"Frontend HTTPS on {CYAN}{local_url}{RESET}")
+    for url in hostname_urls:
+        log(f"Frontend HTTPS on {CYAN}{url}{RESET} (hostname)")
     if lan_url:
         log(f"Frontend HTTPS on {CYAN}{lan_url}{RESET} (for other devices on the LAN)")
     log(
@@ -1302,6 +1319,7 @@ def main() -> None:
     # which then misreads `--experimental-https` as a project directory.
     frontend_cmd = [
         "pnpm", "exec", "next", "dev",
+        "--hostname", "0.0.0.0",
         "--experimental-https",
         "--experimental-https-cert", str(cert_path),
         "--experimental-https-key", str(key_path),
