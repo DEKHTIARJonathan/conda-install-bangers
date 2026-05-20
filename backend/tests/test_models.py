@@ -170,6 +170,33 @@ async def test_switch_model_rejected_while_another_model_is_loading(client):
 
 
 @pytest.mark.asyncio
+async def test_switch_lm_normalizes_legacy_nanovllm_runtime(client, monkeypatch):
+    from bangers.db.connection import get_db
+    from bangers.services.generation import generation_service
+
+    calls: list[dict] = []
+
+    async def fake_initialize_lm(**kwargs):
+        calls.append(kwargs)
+        return "ready", True
+
+    monkeypatch.setattr(generation_service, "initialize_lm", fake_initialize_lm)
+
+    response = await client.post(
+        "/api/models/switch-lm",
+        json={"model_name": "acestep-5Hz-lm-0.6B", "runtime": "nano-vllm"},
+    )
+
+    assert response.status_code == 200
+    assert calls[0]["backend"] == "vllm"
+
+    db = await get_db()
+    async with db.execute("SELECT value FROM settings WHERE key = 'lm_backend'") as cursor:
+        row = await cursor.fetchone()
+    assert row["value"] == "vllm"
+
+
+@pytest.mark.asyncio
 async def test_switch_chat_llm_loads_and_persists_model(client, monkeypatch):
     from bangers.db.connection import get_db
     from bangers.routers import models as models_router
@@ -254,6 +281,7 @@ async def test_models_marks_current_ace_load(client):
     assert dit_models[0]["name"] == "acestep-v15-base"
     assert dit_models[0]["is_active"] is False
     assert dit_models[0]["is_loading"] is True
+    assert dit_models[0]["loaded_on"] == []
 
 
 @pytest.mark.asyncio
@@ -272,6 +300,7 @@ async def test_models_marks_current_ace_lm_load(client):
     assert lm_models[0]["name"] == "acestep-5Hz-lm-0.6B"
     assert lm_models[0]["is_active"] is False
     assert lm_models[0]["is_loading"] is True
+    assert lm_models[0]["loaded_on"] == []
 
 
 @pytest.mark.asyncio
@@ -291,3 +320,58 @@ async def test_models_marks_current_chat_llm_load(client):
     assert chat_models[0]["name"] == "Qwen3-1.7B"
     assert chat_models[0]["is_active"] is False
     assert chat_models[0]["is_loading"] is True
+    assert chat_models[0]["loaded_on"] == []
+
+
+@pytest.mark.asyncio
+async def test_models_active_status_uses_distributed_workers(client, monkeypatch):
+    from pathlib import Path
+
+    from bangers.config import settings
+    from bangers.routers import models as models_router
+    from bangers.services.generation import generation_service
+
+    checkpoints_dir = Path(settings.ACESTEP_PROJECT_ROOT) / "checkpoints"
+    chat_dir = Path(settings.ACESTEP_PROJECT_ROOT) / "chat-llm" / "Qwen3-4B-Instruct-2507"
+    (checkpoints_dir / "acestep-v15-xl-turbo").mkdir(parents=True)
+    (checkpoints_dir / "acestep-5Hz-lm-1.7B").mkdir(parents=True)
+    (checkpoints_dir / "acestep-5Hz-lm-4B").mkdir(parents=True)
+    chat_dir.mkdir(parents=True)
+    (chat_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(settings, "DISTRIBUTED_ROLE", "coordinator")
+    monkeypatch.setattr(settings, "DISTRIBUTED_WORKERS", ("http://worker",))
+    generation_service.backend.active_lm_model = "acestep-5Hz-lm-4B"
+
+    async def fake_distributed_active_models():
+        return {
+            "dit": {"acestep-v15-xl-turbo": {"spark-local-music"}},
+            "lm": {"acestep-5Hz-lm-1.7B": {"spark-9bb0-lm-chat"}},
+            "chat_llm": {"Qwen3-4B-Instruct-2507": {"spark-9bb0-lm-chat"}},
+        }
+
+    monkeypatch.setattr(
+        models_router,
+        "_distributed_active_models",
+        fake_distributed_active_models,
+    )
+    monkeypatch.setattr(models_router, "get_loaded_chat_model_name", lambda: "")
+
+    response = await client.get("/api/models")
+
+    assert response.status_code == 200
+    data = response.json()
+    dit = {model["name"]: model for model in data["dit_models"]}
+    lm = {model["name"]: model for model in data["lm_models"]}
+    chat = {model["name"]: model for model in data["chat_llm_models"]}
+
+    assert dit["acestep-v15-xl-turbo"]["is_active"] is True
+    assert dit["acestep-v15-xl-turbo"]["is_loading"] is False
+    assert dit["acestep-v15-xl-turbo"]["loaded_on"] == ["spark-local-music"]
+    assert lm["acestep-5Hz-lm-1.7B"]["is_active"] is True
+    assert lm["acestep-5Hz-lm-1.7B"]["is_loading"] is False
+    assert lm["acestep-5Hz-lm-1.7B"]["loaded_on"] == ["spark-9bb0-lm-chat"]
+    assert lm["acestep-5Hz-lm-4B"]["is_active"] is False
+    assert chat["Qwen3-4B-Instruct-2507"]["is_active"] is True
+    assert chat["Qwen3-4B-Instruct-2507"]["is_loading"] is False
+    assert chat["Qwen3-4B-Instruct-2507"]["loaded_on"] == ["spark-9bb0-lm-chat"]

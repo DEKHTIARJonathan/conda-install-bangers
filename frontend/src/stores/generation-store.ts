@@ -71,6 +71,7 @@ export interface GenerationJob {
   generatedTitle: string | null;
   timings?: Record<string, number>;
   hiddenFromQueue?: boolean;
+  submittedCustomForm?: CustomForm;
 }
 
 interface GenerationState {

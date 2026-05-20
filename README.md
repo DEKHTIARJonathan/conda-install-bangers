@@ -103,14 +103,16 @@ Rough ACE LM guidance:
 
 ## Configuration
 
-Common environment variables:
+Environment variables (all optional, sensible defaults provided). `mise run dev`
+also loads a repo-root `.env` file before starting processes:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `BANGERS_HOST` | `0.0.0.0` | Backend bind address |
 | `BANGERS_PORT` | `8000` | Backend port |
 | `BANGERS_DEVICE` | `auto` | `auto`, `cuda`, `mps`, or `cpu` |
-| `BANGERS_LM_BACKEND` | `mlx` on macOS, `nano-vllm` elsewhere | ACE LM backend |
+| `BANGERS_LM_BACKEND` | `mlx` on macOS, `vllm` elsewhere | ACE LM backend |
+| `BANGERS_VLLM_ENFORCE_EAGER` | `auto` | Force nano-vLLM eager mode (`true`/`false`/`auto`) |
 | `BANGERS_AUDIO_FORMAT` | `flac` | Default output format |
 | `BANGERS_BATCH_SIZE` | `2` | Default samples per generation |
 | `BANGERS_INFERENCE_STEPS` | `8` | Default DiT steps |
@@ -119,6 +121,42 @@ Common environment variables:
 | `BANGERS_DATA_DIR` | `backend/data` | SQLite DB, audio, uploads |
 | `BANGERS_MODEL_CACHE_DIR` | `.cache/models` | Model/cache root |
 | `ACESTEP_PROJECT_ROOT` | `.cache/models` | ACE checkpoints and chat LLM root |
+| `BANGERS_DISTRIBUTED_ROLE` | `standalone` | `standalone`, `coordinator`, or `worker` |
+| `BANGERS_NODE_ID` | hostname | Human-readable node name reported to coordinators |
+| `BANGERS_WORKERS` | empty | Comma-separated remote worker backend URLs used by a coordinator; `mise run dev` also prepends automatic local GPU workers |
+| `BANGERS_WORKER_CAPABILITIES` | all on standalone/worker, empty on coordinator | Comma-separated local capabilities: `music`, `ace_lm`, `chat_llm` |
+| `BANGERS_WORKER_TOKEN` | empty | Optional shared token for coordinator-to-worker requests |
+| `BANGERS_WORKER_TIMEOUT_SECONDS` | `900` | Coordinator HTTP timeout for long worker jobs |
+| `BANGERS_DEV_GPU_MODE` | `workers` | `mise run dev` local GPU mode: `workers` starts one local worker per visible CUDA GPU; `standalone` uses the old single-backend path |
+| `BANGERS_DEV_WORKER_PORT_BASE` | backend port + 1 | First localhost port for automatic `mise run dev` GPU workers |
+| `BANGERS_DEV_WORKER_CAPABILITIES` | `music,ace_lm,chat_llm` | Capabilities assigned to automatic local GPU workers |
+| `BANGERS_REMOTE_WORKER_AUTOSTART` | `true` | SSH into `BANGERS_WORKERS` hosts from `mise run dev` and start remote worker backends |
+| `BANGERS_REMOTE_PROJECT_ROOT` | current repo path | Repo path to use on remote worker hosts |
+
+### Two DGX Spark Inference Split
+
+Run one backend as the coordinator and one backend per worker. A practical two-node split is:
+
+```bash
+# Coordinator/UI node
+BANGERS_DISTRIBUTED_ROLE=coordinator
+BANGERS_WORKERS=http://spark-music:8000,http://spark-llm:8000
+BANGERS_WORKER_TOKEN=change-me
+
+# Spark A: ACE-Step DiT/VAE music worker
+BANGERS_DISTRIBUTED_ROLE=worker
+BANGERS_NODE_ID=spark-music
+BANGERS_WORKER_CAPABILITIES=music
+BANGERS_WORKER_TOKEN=change-me
+
+# Spark B: ACE 5Hz LM plus app chat/title/lyrics worker
+BANGERS_DISTRIBUTED_ROLE=worker
+BANGERS_NODE_ID=spark-llm
+BANGERS_WORKER_CAPABILITIES=ace_lm,chat_llm
+BANGERS_WORKER_TOKEN=change-me
+```
+
+The coordinator keeps the UI, database, history, uploads, and copied audio artifacts. Workers expose internal APIs under `/api/internal/worker/*`; use the shared token on any non-private LAN.
 
 Most generation defaults can also be changed in the app under **Settings**.
 

@@ -11,6 +11,8 @@ from the model itself.
 """
 
 import asyncio
+import concurrent.futures
+import importlib.util
 import sys
 import threading
 from abc import ABC, abstractmethod
@@ -65,6 +67,10 @@ class MLXChatRuntime(ChatRuntime):
         self._tokenizer = None
         self._loaded_model_name: str = ""
         self._lock = threading.Lock()
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="bangers-mlx-chat",
+        )
 
         from bangers.config import settings
         self._chat_llm_dir = Path(settings.ACESTEP_PROJECT_ROOT) / "chat-llm"
@@ -73,11 +79,7 @@ class MLXChatRuntime(ChatRuntime):
     def runtime_supported() -> bool:
         if sys.platform != "darwin":
             return False
-        try:
-            import mlx_lm  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        return importlib.util.find_spec("mlx_lm") is not None
 
     def _model_installed(self, model_name: str) -> bool:
         if not model_name:
@@ -124,6 +126,8 @@ class MLXChatRuntime(ChatRuntime):
             from mlx_lm import generate  # type: ignore[import-untyped]
             from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
 
+            self._ensure_generation_stream_for_current_thread(generate)
+
             prompt = self._tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
@@ -135,6 +139,22 @@ class MLXChatRuntime(ChatRuntime):
                 max_tokens=max_tokens,
                 sampler=sampler,
             )
+
+    def _ensure_generation_stream_for_current_thread(self, generate_fn) -> None:
+        """MLX-LM creates its generation stream at import time.
+
+        Runtime availability checks used to import MLX-LM on the event-loop
+        thread. If that happens before generation, the module-level stream is
+        not valid inside the dedicated MLX chat thread. Rebinding it here keeps
+        MLX-LM's global generation stream local to the thread that uses it.
+        """
+        try:
+            import mlx.core as mx  # type: ignore[import-untyped]
+
+            module_globals = getattr(generate_fn, "__globals__", {})
+            module_globals["generation_stream"] = mx.new_stream(mx.default_device())
+        except Exception as exc:
+            logger.debug(f"Failed to refresh MLX generation stream: {exc}")
 
     async def chat(
         self,
@@ -164,7 +184,9 @@ class MLXChatRuntime(ChatRuntime):
 
         try:
             logger.info(f"LLM chat [mlx] model={model} temp={temperature}")
-            return await asyncio.to_thread(
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                self._executor,
                 self._generate_sync, messages, model, max_tokens, temperature
             )
         finally:

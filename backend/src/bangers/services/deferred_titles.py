@@ -72,12 +72,16 @@ def schedule_history_title_retry(
                 (title, history_id),
             )
             await db.commit()
+            from bangers.services.generation import generation_service
+
+            job = generation_service.get_job(job_id) or {}
+            client_id = str(job.get("client_id") or "").strip() or None
             await generation_ws_manager.broadcast({
                 "type": "title",
                 "job_id": job_id,
                 "history_id": history_id,
                 "title": title,
-            })
+            }, client_id=client_id)
         except Exception as exc:
             logger.warning(f"history title: failed to persist deferred title: {exc}")
 

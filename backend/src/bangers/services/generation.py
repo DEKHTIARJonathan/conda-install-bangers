@@ -2,6 +2,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
+from bangers.config import settings
 from bangers.backends.ace_step_backend import AceStepBackend
 from bangers.services.generation_request_builder import normalize_generation_params
 from bangers.services.lyrics_pipeline import (
@@ -116,7 +117,12 @@ class GenerationService:
         )
 
     def public_params(self, params_dict: dict[str, Any]) -> dict[str, Any]:
-        return strip_lyrics_pipeline_internal_keys(params_dict)
+        params = strip_lyrics_pipeline_internal_keys(params_dict)
+        return {
+            key: value
+            for key, value in params.items()
+            if not key.startswith("_distributed_")
+        }
 
     async def generate(
         self,
@@ -125,11 +131,15 @@ class GenerationService:
         *,
         lyrics_prepared: bool = False,
     ) -> dict[str, Any]:
-        if not self.backend.is_ready:
+        if not settings.delegates_to_workers and not self.backend.is_ready:
             return {"success": False, "error": "ACE-Step backend not initialized"}
 
         try:
-            if lyrics_prepared and is_lyrics_pipeline_prepared(params_dict):
+            trusted_lyrics_prepared = lyrics_prepared and (
+                is_lyrics_pipeline_prepared(params_dict)
+                or params_dict.get("_distributed_lyrics_prepared") is True
+            )
+            if trusted_lyrics_prepared:
                 normalized_params = normalize_generation_params(params_dict)
             else:
                 from bangers.services.gpu_lock import gpu_lock
@@ -146,9 +156,24 @@ class GenerationService:
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
+        if settings.delegates_to_workers:
+            try:
+                from bangers.services.distributed import distributed_cluster
+
+                remote_result = await distributed_cluster.generate_on_remote_music_worker(
+                    normalized_params,
+                    progress_callback=progress_callback,
+                    lyrics_prepared=lyrics_prepared,
+                )
+                if remote_result is not None:
+                    return remote_result
+            except Exception as exc:
+                return {"success": False, "error": str(exc)}
+            return {"success": False, "error": "No remote music worker is ready"}
+
         return await self.backend.generate(normalized_params, progress_callback=progress_callback)
 
-    def create_job(self) -> str:
+    def create_job(self, client_id: str | None = None) -> str:
         job_id = str(uuid.uuid4())
         self._jobs[job_id] = {
             "status": "queued",
@@ -158,6 +183,7 @@ class GenerationService:
             "error": None,
             "timings": {},
             "created_at": time.time(),
+            "client_id": client_id or "",
         }
         return job_id
 

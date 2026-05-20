@@ -79,7 +79,7 @@ export function ModelCards({
                   key={model.name}
                   className="flex items-center justify-between rounded-lg border border-border p-3"
                 >
-                  <div className="flex items-center gap-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
                     {description ? (
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -92,6 +92,11 @@ export function ModelCards({
                     ) : (
                       <span className="text-sm font-medium">{model.name}</span>
                     )}
+                    {model.loaded_on?.map((node) => (
+                      <Badge key={node} variant="outline" className="text-[10px] text-muted-foreground">
+                        {node.replace(/^spark-/, "")}
+                      </Badge>
+                    ))}
                   </div>
                   {loading ? (
                     <Button variant="outline" size="sm" disabled>

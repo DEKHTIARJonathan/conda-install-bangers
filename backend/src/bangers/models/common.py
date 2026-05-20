@@ -124,8 +124,43 @@ class SwitchModelRequest(BaseModel):
     runtime: Optional[str] = None
 
 
-class GpuStatsResponse(BaseModel):
-    device: str = ""
+class GpuDeviceStats(BaseModel):
+    node_id: str = ""
+    node_role: str = ""
+    label: str = ""
+    device_index: int = 0
+    name: str = ""
+    uuid: str = ""
+    provider: str = ""
+    memory_type: str = ""
+    utilization_gpu_percent: Optional[float] = None
+    utilization_memory_percent: Optional[float] = None
+    renderer_utilization_percent: Optional[float] = None
+    tiler_utilization_percent: Optional[float] = None
     vram_used_mb: Optional[float] = None
     vram_total_mb: Optional[float] = None
     vram_percent: Optional[float] = None
+    memory_cache_mb: Optional[float] = None
+    memory_peak_mb: Optional[float] = None
+    power_draw_w: Optional[float] = None
+    power_limit_w: Optional[float] = None
+    busy: bool = False
+    holder: Optional[str] = None
+    error: str = ""
+
+
+class GpuStatsResponse(BaseModel):
+    device: str = ""
+    provider: str = ""
+    memory_type: str = ""
+    gpu_utilization_percent: Optional[float] = None
+    renderer_utilization_percent: Optional[float] = None
+    tiler_utilization_percent: Optional[float] = None
+    vram_used_mb: Optional[float] = None
+    vram_total_mb: Optional[float] = None
+    vram_percent: Optional[float] = None
+    memory_cache_mb: Optional[float] = None
+    memory_peak_mb: Optional[float] = None
+    gpus: list[GpuDeviceStats] = Field(default_factory=list)
+    updated_at: float = 0.0
+    error: str = ""

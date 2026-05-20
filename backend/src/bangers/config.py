@@ -1,11 +1,12 @@
 import os
+import socket
 import sys
 from pathlib import Path
 
 from bangers.model_registry import is_lm_disabled
 
 
-DEFAULT_LM_BACKEND = "mlx" if sys.platform == "darwin" else "nano-vllm"
+DEFAULT_LM_BACKEND = "mlx" if sys.platform == "darwin" else "vllm"
 DEFAULT_DEVICE = "auto"
 DEFAULT_AUDIO_FORMAT = "flac"
 DEFAULT_BATCH_SIZE = 2
@@ -20,6 +21,15 @@ DEFAULT_THROTTLE_RADIO_ONLY = True
 DEFAULT_KEEP_ACTIVE_MODELS_RESIDENT = True
 DEFAULT_PARALLEL_PIPELINE_ENABLED = False
 DEFAULT_LYRICS_GUARDRAILS_ENABLED = True
+
+DISTRIBUTED_CAPABILITY_MUSIC = "music"
+DISTRIBUTED_CAPABILITY_ACE_LM = "ace_lm"
+DISTRIBUTED_CAPABILITY_CHAT_LLM = "chat_llm"
+DISTRIBUTED_CAPABILITIES = frozenset({
+    DISTRIBUTED_CAPABILITY_MUSIC,
+    DISTRIBUTED_CAPABILITY_ACE_LM,
+    DISTRIBUTED_CAPABILITY_CHAT_LLM,
+})
 
 
 def _bool_string(value: str | bool) -> str:
@@ -38,6 +48,27 @@ def _getenv(name: str, default: str) -> str:
 def _has_env_value(name: str) -> bool:
     value = os.getenv(name)
     return value is not None and value != ""
+
+
+def _parse_csv(value: str) -> tuple[str, ...]:
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def _parse_capabilities(value: str) -> frozenset[str]:
+    requested = {part.lower() for part in _parse_csv(value)}
+    return frozenset(requested & DISTRIBUTED_CAPABILITIES)
+
+
+def normalize_lm_backend(backend: str | None) -> str:
+    """Return the ACE-Step backend name for a configured LM runtime."""
+    value = (backend or DEFAULT_LM_BACKEND).strip().lower()
+    if not value:
+        value = DEFAULT_LM_BACKEND
+    if value in {"nano-vllm", "nano_vllm", "nanovllm"}:
+        value = "vllm"
+    if value == "mlx" and sys.platform != "darwin":
+        value = "vllm"
+    return value
 
 
 class Settings:
@@ -68,6 +99,13 @@ class Settings:
     DEFAULT_GUIDANCE_SCALE: float
     DEFAULT_THINKING: bool
 
+    DISTRIBUTED_ROLE: str
+    DISTRIBUTED_NODE_ID: str
+    DISTRIBUTED_WORKERS: tuple[str, ...]
+    DISTRIBUTED_CAPABILITIES: frozenset[str]
+    DISTRIBUTED_TOKEN: str
+    DISTRIBUTED_REQUEST_TIMEOUT_SECONDS: float
+
     def apply_runtime_overrides(self) -> None:
         """Refresh environment-backed settings."""
         self.HOST = _getenv("BANGERS_HOST", "0.0.0.0")
@@ -94,9 +132,8 @@ class Settings:
         os.environ.setdefault("HF_HOME", str(self.HF_HOME_DIR))
         os.environ.setdefault("HF_HUB_CACHE", str(self.HF_HUB_CACHE_DIR))
 
-        self.DEFAULT_LM_BACKEND = _getenv(
-            "BANGERS_LM_BACKEND",
-            DEFAULT_LM_BACKEND,
+        self.DEFAULT_LM_BACKEND = normalize_lm_backend(
+            _getenv("BANGERS_LM_BACKEND", DEFAULT_LM_BACKEND)
         )
         self.DEFAULT_DEVICE = _getenv("BANGERS_DEVICE", DEFAULT_DEVICE)
 
@@ -108,6 +145,25 @@ class Settings:
         self.DEFAULT_THINKING = _bool_string(
             _getenv("BANGERS_THINKING", _bool_string(DEFAULT_THINKING))
         ) == "true"
+
+        role = _getenv("BANGERS_DISTRIBUTED_ROLE", "standalone").strip().lower()
+        if role not in {"standalone", "coordinator", "worker"}:
+            role = "standalone"
+        self.DISTRIBUTED_ROLE = role
+        self.DISTRIBUTED_NODE_ID = _getenv("BANGERS_NODE_ID", socket.gethostname())
+        self.DISTRIBUTED_WORKERS = _parse_csv(_getenv("BANGERS_WORKERS", ""))
+        raw_capabilities = os.getenv("BANGERS_WORKER_CAPABILITIES")
+        if raw_capabilities is None:
+            raw_capabilities = (
+                ""
+                if role == "coordinator"
+                else ",".join(sorted(DISTRIBUTED_CAPABILITIES))
+            )
+        self.DISTRIBUTED_CAPABILITIES = _parse_capabilities(raw_capabilities)
+        self.DISTRIBUTED_TOKEN = _getenv("BANGERS_WORKER_TOKEN", "")
+        self.DISTRIBUTED_REQUEST_TIMEOUT_SECONDS = float(
+            _getenv("BANGERS_WORKER_TIMEOUT_SECONDS", "900")
+        )
 
     @staticmethod
     def is_lm_disabled(model_name: str | None) -> bool:
@@ -168,6 +224,13 @@ class Settings:
         (project_root / ".cache" / "acestep").mkdir(parents=True, exist_ok=True)
         self.HF_HOME_DIR.mkdir(parents=True, exist_ok=True)
         self.HF_HUB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    def has_distributed_capability(self, capability: str) -> bool:
+        return capability in self.DISTRIBUTED_CAPABILITIES
+
+    @property
+    def delegates_to_workers(self) -> bool:
+        return self.DISTRIBUTED_ROLE == "coordinator" and bool(self.DISTRIBUTED_WORKERS)
 
 
 settings = Settings()

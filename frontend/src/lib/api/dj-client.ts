@@ -1,4 +1,5 @@
 import { request } from "./base";
+import { getClientId } from "@/lib/client-session";
 import type {
   DJConversationResponse,
   DJConversationDetailResponse,
@@ -28,7 +29,7 @@ export const sendDJMessage = (conversationId: string, content: string) =>
     fallback_notice: string | null;
   }>(`/dj/conversations/${conversationId}/messages`, {
     method: "POST",
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, client_id: getClientId() }),
   });
 
 export const fetchDJInfo = () =>

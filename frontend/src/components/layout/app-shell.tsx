@@ -20,6 +20,7 @@ import { MiniPlayerQueue } from "./mini-player-queue";
 import { FullPlayer } from "./full-player";
 import { ConnectionBanner } from "./connection-banner";
 import { PageTransition } from "./page-transition";
+import { GpuMonitorInset } from "./gpu-monitor-inset";
 
 export function AppShell({ children }: { children: ReactNode }) {
   useKeyboardShortcuts();
@@ -90,6 +91,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <MiniPlayer />
       <MiniPlayerQueue />
       <FullPlayer />
+      <GpuMonitorInset hasMiniPlayer={Boolean(currentSong)} />
     </div>
   );
 }

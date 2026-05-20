@@ -36,6 +36,7 @@ type ChatLlmRow =
       description: string;
       isActive: boolean;
       isLoading: boolean;
+      loadedOn: string[];
     }
   | {
       state: "downloadable";
@@ -53,6 +54,7 @@ type ChatLlmRow =
       description: string;
       isActive: boolean;
       isLoading: boolean;
+      loadedOn: string[];
     };
 
 const IS_MAC =
@@ -218,6 +220,7 @@ export function ModelsClient() {
         description: availableByName.get(installed.name)?.description ?? "",
         isActive: installed.is_active,
         isLoading: Boolean(installed.is_loading),
+        loadedOn: installed.loaded_on ?? [],
       });
     }
 
@@ -236,6 +239,7 @@ export function ModelsClient() {
           description: candidate.description ?? "",
           isActive: false,
           isLoading: false,
+          loadedOn: [],
         });
       } else {
         rows.push({
@@ -422,6 +426,11 @@ export function ModelsClient() {
                                   <span className="text-sm font-medium">{row.name}</span>
                                 )}
                                 <ModelCompatibilityBadges model={badgesModel} />
+                                {row.loadedOn.map((node) => (
+                                  <Badge key={node} variant="outline" className="text-[10px] text-muted-foreground">
+                                    {node.replace(/^spark-/, "")}
+                                  </Badge>
+                                ))}
                               </div>
                               {row.state === "unsupported" ? null : isLoadingModel ? (
                                 <Button variant="outline" size="sm" disabled>

@@ -6,7 +6,7 @@ from typing import Any, Callable, Optional
 
 from loguru import logger
 
-from bangers.config import settings
+from bangers.config import normalize_lm_backend, settings
 
 
 class _DownloadProgressTracker:
@@ -48,6 +48,62 @@ ACE_STEP_SUPPORTED_TASK_TYPES = ("text2music", "music2music", "cover")
 ACE_STEP_SUPPORTED_AUDIO_FORMATS = ("flac", "mp3", "wav", "wav32", "opus", "aac")
 
 _FS_EXPECTED_BYTES: int = 15_000_000_000
+_VLLM_ENFORCE_EAGER_ENV = "BANGERS_VLLM_ENFORCE_EAGER"
+
+
+def _bool_env(value: str) -> bool | None:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _should_enforce_vllm_eager(device: str) -> bool:
+    configured = os.getenv(_VLLM_ENFORCE_EAGER_ENV, "auto")
+    parsed = _bool_env(configured)
+    if parsed is not None:
+        return parsed
+    if configured.strip().lower() not in {"", "auto"}:
+        logger.warning(f"Ignoring invalid {_VLLM_ENFORCE_EAGER_ENV}={configured!r}; using auto")
+
+    if device not in {"auto", "cuda"}:
+        return False
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        current_device = torch.cuda.current_device()
+        name = torch.cuda.get_device_name(current_device).upper()
+        capability = torch.cuda.get_device_capability(current_device)
+        return "GB10" in name or capability >= (12, 1)
+    except Exception as exc:
+        logger.debug(f"Could not determine whether vLLM eager mode is needed: {exc}")
+        return False
+
+
+def _install_vllm_eager_wrapper(handler: Any, device: str) -> None:
+    initializer = getattr(handler, "_initialize_5hz_lm_vllm", None)
+    if initializer is None:
+        return
+    setattr(handler, "_bangers_vllm_device", device)
+    if getattr(handler, "_bangers_vllm_eager_wrapped", False):
+        return
+
+    def _wrapped_initialize_vllm(model_path: str, enforce_eager: bool = False) -> str:
+        wrapper_device = getattr(handler, "_bangers_vllm_device", "auto")
+        if _should_enforce_vllm_eager(wrapper_device) and not enforce_eager:
+            logger.info(
+                "Forcing vLLM eager mode to avoid CUDA graph capture failures "
+                f"(set {_VLLM_ENFORCE_EAGER_ENV}=false to opt out)"
+            )
+            enforce_eager = True
+        return initializer(model_path, enforce_eager=enforce_eager)
+
+    setattr(handler, "_initialize_5hz_lm_vllm", _wrapped_initialize_vllm)
+    setattr(handler, "_bangers_vllm_eager_wrapped", True)
 
 
 class AceStepBackend:
@@ -300,15 +356,20 @@ class AceStepBackend:
                 return "LM disabled", True
 
             checkpoint_dir = os.path.join(settings.ACESTEP_PROJECT_ROOT, "checkpoints")
+            ace_backend = normalize_lm_backend(backend)
+            if ace_backend != backend:
+                logger.info(f"Mapping LM backend '{backend}' to ACE-Step backend '{ace_backend}'")
 
             def _sync_init():
                 from acestep.llm_inference import LLMHandler
                 if self.llm_handler is None:
                     self.llm_handler = LLMHandler()
+                if ace_backend == "vllm":
+                    _install_vllm_eager_wrapper(self.llm_handler, device)
                 return self.llm_handler.initialize(
                     checkpoint_dir=checkpoint_dir,
                     lm_model_path=lm_model_path,
-                    backend=backend,
+                    backend=ace_backend,
                     device=device,
                 )
 

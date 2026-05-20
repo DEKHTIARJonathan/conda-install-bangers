@@ -1,31 +1,41 @@
 import json
 import asyncio
 import math
+from dataclasses import dataclass
 from typing import Any
 from fastapi import WebSocket
 from loguru import logger
+
+
+@dataclass
+class _Connection:
+    websocket: WebSocket
+    client_id: str | None = None
 
 
 class ConnectionManager:
     """Manages WebSocket connections for real-time generation progress."""
 
     def __init__(self) -> None:
-        self._connections: list[WebSocket] = []
+        self._connections: list[_Connection] = []
         self._lock = asyncio.Lock()
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket, client_id: str | None = None) -> None:
         await websocket.accept()
         async with self._lock:
-            self._connections.append(websocket)
+            self._connections.append(_Connection(websocket=websocket, client_id=client_id))
         logger.info(f"WebSocket connected. Total: {len(self._connections)}")
 
     async def disconnect(self, websocket: WebSocket) -> None:
         async with self._lock:
-            if websocket in self._connections:
-                self._connections.remove(websocket)
+            self._connections = [
+                connection
+                for connection in self._connections
+                if connection.websocket is not websocket
+            ]
         logger.info(f"WebSocket disconnected. Total: {len(self._connections)}")
 
-    async def broadcast(self, message: dict[str, Any]) -> None:
+    async def broadcast(self, message: dict[str, Any], client_id: str | None = None) -> None:
         # Replace NaN/Inf floats with None (JSON spec doesn't support them)
         sanitized = {
             k: (None if isinstance(v, float) and not math.isfinite(v) else v)
@@ -34,19 +44,25 @@ class ConnectionManager:
         data = json.dumps(sanitized)
         disconnected: list[WebSocket] = []
         async with self._lock:
-            connections = list(self._connections)
+            connections = [
+                connection
+                for connection in self._connections
+                if client_id is None or connection.client_id == client_id
+            ]
 
-        for ws in connections:
+        for connection in connections:
             try:
-                await ws.send_text(data)
+                await connection.websocket.send_text(data)
             except Exception:
-                disconnected.append(ws)
+                disconnected.append(connection.websocket)
 
         if disconnected:
             async with self._lock:
-                for ws in disconnected:
-                    if ws in self._connections:
-                        self._connections.remove(ws)
+                self._connections = [
+                    connection
+                    for connection in self._connections
+                    if connection.websocket not in disconnected
+                ]
 
     async def send_to(self, websocket: WebSocket, message: dict[str, Any]) -> None:
         try:

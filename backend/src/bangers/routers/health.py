@@ -2,6 +2,7 @@ import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
+from bangers.config import settings
 from bangers.models.common import HealthResponse, SettingsResponse, SettingsUpdate
 from bangers.services.generation import generation_service
 from bangers.db.connection import get_db, get_instance_id
@@ -18,6 +19,19 @@ def build_health_snapshot() -> HealthResponse:
     """
     svc = generation_service
     instance_id = get_instance_id()
+    if settings.delegates_to_workers and not svc.dit_initialized:
+        return HealthResponse(
+            status="ok",
+            dit_model_loaded=True,
+            lm_model_loaded=True,
+            dit_model=svc.active_dit_model or "distributed-workers",
+            lm_model=svc.active_lm_model or "distributed-workers",
+            device="distributed",
+            init_stage=svc.init_stage,
+            init_error=svc.init_error,
+            download_progress=svc.download_progress,
+            instance_id=instance_id,
+        )
     lm_ready = svc.lm_initialized or svc.lm_disabled
     status = "ok" if svc.dit_initialized else "degraded"
     loading_state = svc.loading_state or {}

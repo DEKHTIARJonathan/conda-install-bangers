@@ -16,9 +16,26 @@ vi.stubGlobal("localStorage", {
   },
 });
 
+const mockSessionStorage: Record<string, string> = {};
+const sessionStorageMock = {
+  getItem: (key: string) => mockSessionStorage[key] ?? null,
+  setItem: (key: string, val: string) => {
+    mockSessionStorage[key] = val;
+  },
+  removeItem: (key: string) => {
+    delete mockSessionStorage[key];
+  },
+};
+vi.stubGlobal("sessionStorage", sessionStorageMock);
+Object.defineProperty(window, "sessionStorage", {
+  value: sessionStorageMock,
+  configurable: true,
+});
+
 describe("api client", () => {
   beforeEach(() => {
     mockFetch.mockReset();
+    for (const key of Object.keys(mockSessionStorage)) delete mockSessionStorage[key];
   });
 
   it("request returns parsed JSON on 200", async () => {
@@ -72,6 +89,9 @@ describe("api client", () => {
         body: expect.stringContaining('"caption":"test song"'),
       }),
     );
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+    expect(body.client_id).toEqual(expect.any(String));
+    expect(body.client_id.length).toBeGreaterThan(0);
   });
 
   it("switchChatLlmModel loads model through switch endpoint", async () => {

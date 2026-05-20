@@ -4,8 +4,15 @@ import pytest
 def _reset_settings(monkeypatch):
     for name in [
         "BANGERS_BATCH_SIZE",
+        "BANGERS_LM_BACKEND",
         "BANGERS_THINKING",
         "BANGERS_MODEL_CACHE_DIR",
+        "BANGERS_DISTRIBUTED_ROLE",
+        "BANGERS_NODE_ID",
+        "BANGERS_WORKERS",
+        "BANGERS_WORKER_CAPABILITIES",
+        "BANGERS_WORKER_TOKEN",
+        "BANGERS_WORKER_TIMEOUT_SECONDS",
         "ACESTEP_PROJECT_ROOT",
         "HF_HOME",
         "HF_HUB_CACHE",
@@ -67,6 +74,30 @@ def test_db_default_overrides_does_not_seed_models(monkeypatch):
         _reset_settings(monkeypatch)
 
 
+def test_lm_backend_defaults_to_vllm_alias_on_linux(monkeypatch):
+    import sys
+
+    from bangers.config import normalize_lm_backend, settings
+
+    try:
+        _reset_settings(monkeypatch)
+
+        assert normalize_lm_backend("nano-vllm") == "vllm"
+        assert normalize_lm_backend("nano_vllm") == "vllm"
+        assert normalize_lm_backend("nanovllm") == "vllm"
+        assert normalize_lm_backend("VLLM") == "vllm"
+        if sys.platform != "darwin":
+            assert settings.DEFAULT_LM_BACKEND == "vllm"
+            assert normalize_lm_backend("mlx") == "vllm"
+
+        monkeypatch.setenv("BANGERS_LM_BACKEND", "nano-vllm")
+        settings.apply_runtime_overrides()
+        assert settings.DEFAULT_LM_BACKEND == "vllm"
+        assert settings.startup_setting_overrides()["lm_backend"] == "vllm"
+    finally:
+        _reset_settings(monkeypatch)
+
+
 def test_env_vars_cannot_set_models(monkeypatch):
     """BANGERS_DIT_MODEL / BANGERS_LM_MODEL must NOT influence settings."""
     from bangers.config import settings
@@ -123,6 +154,43 @@ def test_default_duration_is_seeded_from_backend_default(monkeypatch):
         assert settings.DEFAULT_DURATION == DEFAULT_GENERATION_DURATION
         assert "default_duration" not in settings.startup_setting_overrides()
         assert settings.db_default_overrides()["default_duration"] == str(DEFAULT_GENERATION_DURATION)
+    finally:
+        _reset_settings(monkeypatch)
+
+
+def test_distributed_settings_parse_roles_workers_and_capabilities(monkeypatch):
+    from bangers.config import (
+        DISTRIBUTED_CAPABILITY_CHAT_LLM,
+        DISTRIBUTED_CAPABILITY_MUSIC,
+        DISTRIBUTED_CAPABILITIES,
+        settings,
+    )
+
+    try:
+        _reset_settings(monkeypatch)
+        assert settings.DISTRIBUTED_ROLE == "standalone"
+        assert settings.DISTRIBUTED_CAPABILITIES == DISTRIBUTED_CAPABILITIES
+        assert settings.delegates_to_workers is False
+
+        monkeypatch.setenv("BANGERS_DISTRIBUTED_ROLE", "coordinator")
+        monkeypatch.setenv("BANGERS_WORKERS", "http://spark-a:8000, http://spark-b:8000")
+        settings.apply_runtime_overrides()
+        assert settings.DISTRIBUTED_ROLE == "coordinator"
+        assert settings.DISTRIBUTED_WORKERS == (
+            "http://spark-a:8000",
+            "http://spark-b:8000",
+        )
+        assert settings.DISTRIBUTED_CAPABILITIES == frozenset()
+        assert settings.delegates_to_workers is True
+
+        monkeypatch.setenv("BANGERS_DISTRIBUTED_ROLE", "worker")
+        monkeypatch.setenv("BANGERS_WORKER_CAPABILITIES", "music,chat_llm,unknown")
+        settings.apply_runtime_overrides()
+        assert settings.DISTRIBUTED_ROLE == "worker"
+        assert settings.DISTRIBUTED_CAPABILITIES == frozenset({
+            DISTRIBUTED_CAPABILITY_MUSIC,
+            DISTRIBUTED_CAPABILITY_CHAT_LLM,
+        })
     finally:
         _reset_settings(monkeypatch)
 

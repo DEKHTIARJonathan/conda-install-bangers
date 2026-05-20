@@ -70,7 +70,8 @@ async def send_message(
     if not content.strip():
         raise HTTPException(status_code=400, detail="Message content is required")
 
-    result = await dj_service.send_message(conv_id, content)
+    client_id = str(body.get("client_id") or "").strip() or None
+    result = await dj_service.send_message(conv_id, content, client_id=client_id)
 
     if "error" in result:
         # Service returns either a structured detail dict or a plain string.

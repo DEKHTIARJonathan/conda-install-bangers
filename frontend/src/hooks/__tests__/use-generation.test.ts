@@ -5,8 +5,9 @@ import {
   resolveSubmittedJobState,
   runReconcilePoller,
 } from "../use-generation";
+import { applyPreparedParamsToSubmittedCustomJob } from "../use-generation-ws";
 import { useGenerationStore } from "@/stores/generation-store";
-import type { GenerationJob } from "@/stores/generation-store";
+import type { CustomForm, GenerationJob } from "@/stores/generation-store";
 import type { JobStatusResponse } from "@/types/api";
 
 vi.mock("sonner", () => ({
@@ -204,5 +205,60 @@ describe("runReconcilePoller", () => {
     });
 
     expect(fetchStatus).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("applyPreparedParamsToSubmittedCustomJob", () => {
+  const submittedCustomForm: CustomForm = {
+    caption: "rough caption",
+    lyrics: "",
+    instrumental: false,
+    bpm: null,
+    keyscale: "",
+    timesignature: "",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useGenerationStore.setState({
+      ...useGenerationStore.getInitialState(),
+      customForm: { ...submittedCustomForm },
+      activeJobs: [
+        {
+          ...job("job-1", "running"),
+          submittedCustomForm: { ...submittedCustomForm },
+        },
+      ],
+    });
+  });
+
+  it("copies prepared generated lyrics into the unchanged submitted form", () => {
+    const applied = applyPreparedParamsToSubmittedCustomJob("job-1", {
+      caption: "polished caption",
+      lyrics: "[verse]\nPrepared lyric",
+      bpm: 92,
+      keyscale: "A minor",
+      timesignature: "3/4",
+    });
+
+    expect(applied).toBe(true);
+    expect(useGenerationStore.getState().customForm).toMatchObject({
+      caption: "polished caption",
+      lyrics: "[verse]\nPrepared lyric",
+      bpm: 92,
+      keyscale: "A minor",
+      timesignature: "3/4",
+    });
+  });
+
+  it("does not overwrite a form edited after submit", () => {
+    useGenerationStore.getState().updateCustomForm({ lyrics: "user typed more" });
+
+    const applied = applyPreparedParamsToSubmittedCustomJob("job-1", {
+      lyrics: "[verse]\nPrepared lyric",
+    });
+
+    expect(applied).toBe(false);
+    expect(useGenerationStore.getState().customForm.lyrics).toBe("user typed more");
   });
 });

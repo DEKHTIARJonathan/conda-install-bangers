@@ -3,15 +3,22 @@
 
 import os
 import argparse
+import csv
 import errno
+import json
+import re
 import signal
 import subprocess
 import sys
 import shutil
+import shlex
+import socket
 import threading
 import time
 import webbrowser
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 from urllib.request import urlopen
 from urllib.error import URLError
 
@@ -40,6 +47,7 @@ CERT_FILE = CERT_DIR / "dev.pem"
 KEY_FILE = CERT_DIR / "dev-key.pem"
 FRONTEND_PORT = 3000
 BACKEND_PORT = 8000
+DEFAULT_LOCAL_WORKER_CAPABILITIES = "music,ace_lm,chat_llm"
 
 # Colors for terminal output
 GREEN = "\033[92m"
@@ -48,6 +56,30 @@ RED = "\033[91m"
 CYAN = "\033[96m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
+
+
+@dataclass(frozen=True)
+class LocalGpu:
+    index: str
+    uuid: str
+    name: str
+    selector: str
+
+
+@dataclass(frozen=True)
+class LocalWorkerSpec:
+    gpu: LocalGpu
+    node_id: str
+    port: int
+    url: str
+
+
+@dataclass(frozen=True)
+class RemoteWorkerSpec:
+    url: str
+    ssh_host: str
+    port: int
+    root: str
 
 
 def _write_runtime_log_bytes(data: bytes) -> None:
@@ -177,6 +209,28 @@ def build_runtime_env() -> dict[str, str]:
     return env
 
 
+def _load_dotenv(path: Path) -> None:
+    """Load simple KEY=VALUE lines from .env without overriding real env."""
+    if not path.exists():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip().strip("'\"")
+        os.environ[key] = value
+
+
 def _conda_executable() -> str | None:
     conda_exe = os.environ.get("CONDA_EXE")
     if conda_exe and Path(conda_exe).exists():
@@ -290,6 +344,7 @@ def _popen(cmd: list[str], **kwargs) -> subprocess.Popen:
     """Open a subprocess, using shell=True on Windows so .cmd wrappers are found."""
     if sys.platform == "win32":
         return subprocess.Popen(cmd, shell=True, **kwargs)
+    kwargs.setdefault("start_new_session", True)
     if _RUNTIME_LOG_HANDLE is None:
         return subprocess.Popen(cmd, **kwargs)
 
@@ -425,6 +480,19 @@ def _detect_lan_ip() -> str | None:
         sock.close()
 
 
+def _detect_lan_hostnames() -> list[str]:
+    """Return stable hostnames worth putting in the dev cert SAN list."""
+    names = [socket.gethostname(), socket.getfqdn()]
+    result: list[str] = []
+    seen = {"", "localhost", "localhost.localdomain"}
+    for name in names:
+        name = name.strip()
+        if name and name not in seen:
+            result.append(name)
+            seen.add(name)
+    return result
+
+
 def _has_nvidia_gpu() -> bool:
     """Check if an NVIDIA GPU is available (Windows/Linux)."""
     if shutil.which("nvidia-smi") is None:
@@ -437,6 +505,499 @@ def _has_nvidia_gpu() -> bool:
         return result.returncode == 0 and bool(result.stdout.strip())
     except Exception:
         return False
+
+
+def _cuda_visible_devices() -> tuple[str, ...] | None:
+    """Return the explicit CUDA device allow-list, or None for all devices."""
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value or value.lower() == "all":
+        return None
+    if value.lower() in {"none", "void"} or value == "-1":
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def _detect_local_gpus() -> list[LocalGpu]:
+    """Detect local NVIDIA GPUs, respecting CUDA_VISIBLE_DEVICES when set."""
+    if shutil.which("nvidia-smi") is None:
+        return []
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid,name",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+
+    gpus: list[LocalGpu] = []
+    for row in csv.reader(result.stdout.splitlines()):
+        if len(row) < 3:
+            continue
+        index = row[0].strip()
+        uuid = row[1].strip()
+        name = row[2].strip()
+        gpus.append(LocalGpu(index=index, uuid=uuid, name=name, selector=index))
+
+    visible = _cuda_visible_devices()
+    if visible is None:
+        return gpus
+    if not visible:
+        return []
+
+    by_index = {gpu.index: gpu for gpu in gpus}
+    by_uuid = {gpu.uuid: gpu for gpu in gpus if gpu.uuid}
+    selected: list[LocalGpu] = []
+    for ordinal, token in enumerate(visible):
+        gpu = by_index.get(token) or by_uuid.get(token)
+        if gpu is None:
+            gpu = LocalGpu(
+                index=str(ordinal),
+                uuid=token if token.startswith("GPU-") else "",
+                name=f"CUDA device {token}",
+                selector=token,
+            )
+        else:
+            gpu = LocalGpu(
+                index=gpu.index,
+                uuid=gpu.uuid,
+                name=gpu.name,
+                selector=token,
+            )
+        selected.append(gpu)
+    return selected
+
+
+def _parse_csv(value: str) -> tuple[str, ...]:
+    return tuple(part.strip().rstrip("/") for part in value.split(",") if part.strip())
+
+
+def _configured_worker_urls(env: dict[str, str]) -> list[str]:
+    return list(_parse_csv(env.get("BANGERS_WORKERS", "")))
+
+
+def _merge_worker_urls(local_worker_specs: list[LocalWorkerSpec], configured_urls: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for url in [*(spec.url for spec in local_worker_specs), *configured_urls]:
+        normalized = url.rstrip("/")
+        if normalized and normalized not in seen:
+            merged.append(normalized)
+            seen.add(normalized)
+    return merged
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _remote_worker_autostart_enabled(env: dict[str, str]) -> bool:
+    value = env.get("BANGERS_REMOTE_WORKER_AUTOSTART", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _remote_worker_root(env: dict[str, str]) -> str:
+    return env.get("BANGERS_REMOTE_PROJECT_ROOT", str(ROOT)).strip() or str(ROOT)
+
+
+def _remote_worker_sync_enabled(env: dict[str, str]) -> bool:
+    value = env.get("BANGERS_REMOTE_WORKER_SYNC", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _remote_worker_specs(env: dict[str, str], configured_urls: list[str]) -> list[RemoteWorkerSpec]:
+    if not _remote_worker_autostart_enabled(env):
+        return []
+
+    root = _remote_worker_root(env)
+    specs: list[RemoteWorkerSpec] = []
+    for url in configured_urls:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if not host or _is_loopback_host(host):
+            continue
+        port = parsed.port or (443 if parsed.scheme == "https" else BACKEND_PORT)
+        ssh_host = env.get(f"BANGERS_REMOTE_SSH_HOST_{host.replace('.', '_').replace('-', '_')}", host)
+        specs.append(
+            RemoteWorkerSpec(
+                url=url.rstrip("/"),
+                ssh_host=ssh_host,
+                port=port,
+                root=root,
+            )
+        )
+    return specs
+
+
+def _sync_remote_project(spec: RemoteWorkerSpec) -> None:
+    if shutil.which("rsync") is None:
+        raise RuntimeError("rsync is required for remote worker source sync")
+    target = f"{spec.ssh_host}:{spec.root.rstrip('/')}/"
+    subprocess.run(
+        [
+            "rsync",
+            "-az",
+            "--exclude", ".git/",
+            "--exclude", ".env",
+            "--exclude", ".env.*",
+            "--exclude", ".cache/",
+            "--exclude", "runtime.log",
+            "--exclude", "backend/.conda/",
+            "--exclude", "backend/data/",
+            "--exclude", "frontend/node_modules/",
+            "--exclude", "frontend/.next/",
+            "--exclude", "node_modules/",
+            str(ROOT) + "/",
+            target,
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+
+
+def _shell_export_lines(exports: dict[str, str]) -> str:
+    return "\n".join(f"export {key}={shlex.quote(value)}" for key, value in exports.items())
+
+
+def _read_startup_model_settings(env: dict[str, str]) -> dict[str, str]:
+    import sqlite3
+
+    db_path = Path(env.get("BANGERS_DATA_DIR", str(DEFAULT_DATA_DIR))) / "conda-install-bangers.db"
+    if not db_path.exists():
+        return {}
+    keys = ("dit_model", "lm_model", "lm_backend", "dj_model")
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            rows = conn.execute(
+                f"SELECT key, value FROM settings WHERE key IN ({','.join('?' for _ in keys)})",
+                keys,
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(key): str(value) for key, value in rows if value is not None}
+
+
+def _remote_worker_command(
+    spec: RemoteWorkerSpec,
+    *,
+    capabilities: str,
+    token: str,
+    timeout_seconds: str,
+    startup_model_settings: dict[str, str],
+) -> list[str]:
+    root = spec.root.rstrip("/")
+    backend_dir = f"{root}/backend"
+    python_bin_dir = f"{backend_dir}/.conda/bin"
+    entrypoint = f"{python_bin_dir}/conda-install-bangers"
+    model_cache_dir = f"{root}/.cache/models"
+    data_dir = f"{backend_dir}/data"
+    env = {
+        "PYTHONUNBUFFERED": "1",
+        "BANGERS_DISTRIBUTED_ROLE": "worker",
+        "BANGERS_WORKER_CAPABILITIES": capabilities,
+        "BANGERS_WORKER_TOKEN": token,
+        "BANGERS_WORKER_TIMEOUT_SECONDS": timeout_seconds,
+        "BANGERS_HOST": "0.0.0.0",
+        "BANGERS_PORT": str(spec.port),
+        "BANGERS_DEVICE": "cuda",
+        "BANGERS_DATA_DIR": data_dir,
+        "BANGERS_MODEL_CACHE_DIR": model_cache_dir,
+        "ACESTEP_PROJECT_ROOT": model_cache_dir,
+        "HF_HOME": f"{model_cache_dir}/huggingface",
+        "HF_HUB_CACHE": f"{model_cache_dir}/huggingface/hub",
+        "CONDA_PREFIX": f"{backend_dir}/.conda",
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+        "BANGERS_STARTUP_MODEL_SETTINGS_JSON": json.dumps(
+            startup_model_settings,
+            separators=(",", ":"),
+        ),
+    }
+    if os.environ.get("CUDA_VISIBLE_DEVICES"):
+        env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
+    export_lines = _shell_export_lines(env)
+
+    remote_script = f"""
+set -eu
+cd {shlex.quote(backend_dir)}
+export PATH={shlex.quote(python_bin_dir)}:"$PATH"
+if [ ! -x {shlex.quote(entrypoint)} ]; then
+  echo "Remote worker entrypoint missing: {entrypoint}" >&2
+  exit 127
+fi
+{export_lines}
+python - <<'PY'
+import json
+import os
+import sqlite3
+
+data_dir = os.environ["BANGERS_DATA_DIR"]
+settings = json.loads(os.environ.get("BANGERS_STARTUP_MODEL_SETTINGS_JSON") or "{{}}")
+if settings:
+    os.makedirs(data_dir, exist_ok=True)
+    db_path = os.path.join(data_dir, "conda-install-bangers.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings ("
+            "key TEXT PRIMARY KEY, "
+            "value TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
+            ")"
+        )
+        for key, value in settings.items():
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (key, str(value)),
+            )
+        conn.commit()
+PY
+cleanup() {{
+  if [ "${{worker_pid:-}}" ]; then
+    kill "$worker_pid" 2>/dev/null || true
+    wait "$worker_pid" 2>/dev/null || true
+  fi
+}}
+trap cleanup INT TERM HUP EXIT
+{shlex.quote(entrypoint)} &
+worker_pid=$!
+wait "$worker_pid"
+""".strip()
+    return [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=2",
+        spec.ssh_host,
+        remote_script,
+    ]
+
+
+def _remote_worker_cleanup_command(spec: RemoteWorkerSpec) -> list[str]:
+    root = spec.root.rstrip("/")
+    entrypoint = f"{root}/backend/.conda/bin/conda-install-bangers"
+    pattern = re.escape(entrypoint).replace(
+        "conda\\-install\\-bangers",
+        "[c]onda\\-install\\-bangers",
+    )
+    remote_script = f"""
+set +e
+pkill -TERM -f {shlex.quote(pattern)} 2>/dev/null
+sleep 1
+pkill -KILL -f {shlex.quote(pattern)} 2>/dev/null
+exit 0
+""".strip()
+    return [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=5",
+        spec.ssh_host,
+        remote_script,
+    ]
+
+
+def _stop_remote_worker(spec: RemoteWorkerSpec) -> None:
+    try:
+        subprocess.run(
+            _remote_worker_cleanup_command(spec),
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _process_cmdline(pid: int) -> list[str]:
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return []
+    return [
+        part.decode("utf-8", errors="replace")
+        for part in raw.split(b"\0")
+        if part
+    ]
+
+
+def _process_cwd(pid: int) -> Path | None:
+    try:
+        return Path(os.readlink(Path("/proc") / str(pid) / "cwd")).resolve()
+    except OSError:
+        return None
+
+
+def _path_is_relative_to(path: Path | None, parent: Path) -> bool:
+    if path is None:
+        return False
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _stale_local_dev_pids() -> list[int]:
+    if sys.platform != "linux":
+        return []
+
+    current_pid = os.getpid()
+    root = ROOT.resolve()
+    frontend_dir = FRONTEND_DIR.resolve()
+    backend_entry = str(_conda_env_executable("conda-install-bangers"))
+    pids: list[int] = []
+
+    for proc_dir in Path("/proc").iterdir():
+        if not proc_dir.name.isdigit():
+            continue
+        pid = int(proc_dir.name)
+        if pid == current_pid:
+            continue
+        cmdline = _process_cmdline(pid)
+        if not cmdline:
+            continue
+        joined = " ".join(cmdline)
+        cwd = _process_cwd(pid)
+        in_project = _path_is_relative_to(cwd, root)
+        in_frontend = _path_is_relative_to(cwd, frontend_dir)
+
+        is_launcher = (
+            in_project
+            and Path(cmdline[0]).name.startswith("python")
+            and any(Path(arg).name == "start.py" for arg in cmdline[1:])
+        )
+        is_backend = backend_entry in joined or (in_project and "bangers.main" in joined)
+        is_remote_ssh = (
+            in_project
+            and Path(cmdline[0]).name == "ssh"
+            and "/backend/.conda/bin/conda-install-bangers" in joined
+        )
+        is_frontend = in_frontend and (
+            "next dev" in joined
+            or "next-server" in joined
+            or (Path(cmdline[0]).name in {"node", "pnpm"} and "next" in joined)
+        )
+
+        if is_launcher or is_backend or is_remote_ssh or is_frontend:
+            pids.append(pid)
+
+    return sorted(set(pids))
+
+
+def _signal_process_group_or_pid(pid: int, sig: signal.Signals) -> None:
+    try:
+        os.killpg(pid, sig)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
+def _stop_stale_local_dev_processes() -> None:
+    pids = _stale_local_dev_pids()
+    if not pids:
+        return
+    log(
+        "Stopping stale local dev process(es): "
+        + ", ".join(str(pid) for pid in pids),
+        YELLOW,
+    )
+    for pid in pids:
+        _signal_process_group_or_pid(pid, signal.SIGTERM)
+    time.sleep(1)
+    for pid in pids:
+        if _pid_is_alive(pid):
+            _signal_process_group_or_pid(pid, signal.SIGKILL)
+
+
+def _explicit_distributed_role(env: dict[str, str]) -> str:
+    return env.get("BANGERS_DISTRIBUTED_ROLE", "").strip().lower()
+
+
+def _local_gpu_mode(env: dict[str, str]) -> str:
+    return env.get("BANGERS_DEV_GPU_MODE", "workers").strip().lower()
+
+
+def _local_worker_port_base(env: dict[str, str], backend_port: int) -> int:
+    raw = env.get("BANGERS_DEV_WORKER_PORT_BASE", "")
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            log(
+                f"Ignoring invalid BANGERS_DEV_WORKER_PORT_BASE={raw!r}; using {backend_port + 1}.",
+                YELLOW,
+            )
+    return int(env.get("BANGERS_WORKER_PORT_BASE", str(backend_port + 1)))
+
+
+def _short_host_id() -> str:
+    return socket.gethostname().split(".", 1)[0] or "local"
+
+
+def _plan_local_gpu_workers(
+    env: dict[str, str],
+    gpus: list[LocalGpu],
+    *,
+    backend_port: int,
+) -> list[LocalWorkerSpec]:
+    mode = _local_gpu_mode(env)
+    role = _explicit_distributed_role(env)
+    disabled_modes = {"0", "false", "no", "off", "standalone", "single"}
+    forced_modes = {"1", "true", "yes", "on", "workers", "local-workers", "all"}
+
+    if mode in disabled_modes:
+        return []
+    if role and role != "coordinator":
+        return []
+    if not gpus:
+        return []
+    if mode == "auto" and len(gpus) < 2:
+        return []
+
+    port_base = _local_worker_port_base(env, backend_port)
+    host_id = _short_host_id()
+    specs: list[LocalWorkerSpec] = []
+    for offset, gpu in enumerate(gpus):
+        port = port_base + offset
+        node_id = f"{host_id}-gpu{gpu.index or offset}"
+        specs.append(
+            LocalWorkerSpec(
+                gpu=gpu,
+                node_id=node_id,
+                port=port,
+                url=f"http://127.0.0.1:{port}",
+            )
+        )
+    return specs
 
 
 def _torch_has_cuda() -> bool:
@@ -565,6 +1126,8 @@ def main() -> None:
     print(f"\n{CYAN}{BOLD}  conda install bangers  {RESET}")
     print(f"  {CYAN}Local AI Music Generation{RESET}\n")
 
+    _load_dotenv(ROOT / ".env")
+
     if not check_prerequisites():
         log("Missing prerequisites. See above.", RED)
         sys.exit(1)
@@ -584,15 +1147,45 @@ def main() -> None:
         log("Dependencies up to date.", YELLOW)
 
     runtime_env = build_runtime_env()
+    backend_port = int(runtime_env.get("BANGERS_PORT", str(BACKEND_PORT)))
+    local_gpus = _detect_local_gpus()
+    local_worker_specs = _plan_local_gpu_workers(
+        runtime_env,
+        local_gpus,
+        backend_port=backend_port,
+    )
+    configured_worker_urls = _configured_worker_urls(runtime_env)
+    worker_urls = _merge_worker_urls(local_worker_specs, configured_worker_urls)
+    remote_worker_specs = _remote_worker_specs(runtime_env, configured_worker_urls)
     lan_ip = _detect_lan_ip()
-    extra_sans = [lan_ip] if lan_ip else []
+    lan_hostnames = _detect_lan_hostnames()
+    extra_sans = [*lan_hostnames, *([lan_ip] if lan_ip else [])]
     cert_path, key_path = ensure_dev_cert(extra_sans)
 
     local_url = f"https://localhost:{FRONTEND_PORT}"
     lan_url = f"https://{lan_ip}:{FRONTEND_PORT}" if lan_ip else None
+    hostname_urls = [f"https://{name}:{FRONTEND_PORT}" for name in lan_hostnames]
 
-    log(f"Backend  HTTPS on {CYAN}https://localhost:{BACKEND_PORT}{RESET}")
+    if local_worker_specs:
+        log(
+            f"Local GPU worker dev mode: coordinator on {backend_port}, "
+            f"{len(local_worker_specs)} worker(s) on localhost.",
+            YELLOW,
+        )
+        for spec in local_worker_specs:
+            gpu_label = f"GPU {spec.gpu.index}: {spec.gpu.name}".strip()
+            log(f"Worker {spec.node_id} on {spec.url} -> {gpu_label}", YELLOW)
+    if configured_worker_urls:
+        for url in configured_worker_urls:
+            log(f"Remote worker configured: {url}", YELLOW)
+    if remote_worker_specs:
+        for spec in remote_worker_specs:
+            log(f"Remote worker autostart via SSH: {spec.ssh_host} -> {spec.url}", YELLOW)
+
+    log(f"Backend  HTTPS on {CYAN}https://localhost:{backend_port}{RESET}")
     log(f"Frontend HTTPS on {CYAN}{local_url}{RESET}")
+    for url in hostname_urls:
+        log(f"Frontend HTTPS on {CYAN}{url}{RESET} (hostname)")
     if lan_url:
         log(f"Frontend HTTPS on {CYAN}{lan_url}{RESET} (for other devices on the LAN)")
     log(
@@ -601,30 +1194,71 @@ def main() -> None:
     )
     print()
 
-    procs: list[subprocess.Popen] = []
+    procs: list[tuple[str, subprocess.Popen]] = []
+
+    def terminate_process(proc: subprocess.Popen, *, force: bool = False) -> None:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+            )
+            return
+        sig = signal.SIGKILL if force else signal.SIGTERM
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        except OSError:
+            if force:
+                proc.kill()
+            else:
+                proc.terminate()
 
     def shutdown(sig=None, frame=None):
         print()
         log("Shutting down...")
-        for p in procs:
-            if sys.platform == "win32":
-                # shell=True means p.terminate() only kills cmd.exe, not the
-                # child process tree.  taskkill /T /F kills the entire tree.
-                subprocess.run(
-                    ["taskkill", "/T", "/F", "/PID", str(p.pid)],
-                    capture_output=True,
-                )
-            else:
-                p.terminate()
-        for p in procs:
+        for spec in remote_worker_specs:
+            _stop_remote_worker(spec)
+        for _name, p in procs:
+            terminate_process(p)
+        for _name, p in procs:
             try:
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                p.kill()
+                terminate_process(p, force=True)
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, shutdown)
+
+    _stop_stale_local_dev_processes()
+
+    worker_capabilities = runtime_env.get(
+        "BANGERS_DEV_WORKER_CAPABILITIES",
+        DEFAULT_LOCAL_WORKER_CAPABILITIES,
+    )
+    startup_model_settings = _read_startup_model_settings(runtime_env)
+    sync_remote_workers = _remote_worker_sync_enabled(runtime_env)
+
+    for spec in remote_worker_specs:
+        if sync_remote_workers:
+            log(f"Syncing source to remote worker {spec.ssh_host}...", YELLOW)
+            _sync_remote_project(spec)
+        _stop_remote_worker(spec)
+        remote_worker = _popen(
+            _remote_worker_command(
+                spec,
+                capabilities=worker_capabilities,
+                token=runtime_env.get("BANGERS_WORKER_TOKEN", ""),
+                timeout_seconds=runtime_env.get("BANGERS_WORKER_TIMEOUT_SECONDS", "900"),
+                startup_model_settings=startup_model_settings,
+            ),
+            cwd=ROOT,
+            env=runtime_env,
+        )
+        procs.append((f"Remote worker {spec.url}", remote_worker))
 
     # Start backend with TLS — uvicorn loads the same self-signed cert that
     # we feed to Next.js below, so the frontend's cross-origin fetch to the
@@ -634,6 +1268,15 @@ def main() -> None:
         "BANGERS_SSL_CERTFILE": str(cert_path),
         "BANGERS_SSL_KEYFILE": str(key_path),
     }
+    if worker_urls:
+        backend_env.update({
+            "BANGERS_DISTRIBUTED_ROLE": "coordinator",
+            "BANGERS_WORKERS": ",".join(worker_urls),
+            "BANGERS_WORKER_CAPABILITIES": "",
+            # Keep the coordinator out of CUDA memory. Worker processes own
+            # inference devices and the coordinator talks to them over HTTP.
+            "CUDA_VISIBLE_DEVICES": "-1",
+        })
     backend_entry = _conda_env_executable("conda-install-bangers")
     backend_cmd = (
         [str(backend_entry)]
@@ -645,7 +1288,26 @@ def main() -> None:
         cwd=BACKEND_DIR,
         env=backend_env,
     )
-    procs.append(backend)
+    procs.append(("Backend", backend))
+
+    for spec in local_worker_specs:
+        worker_env = {
+            **_with_conda_env_on_path(runtime_env),
+            "BANGERS_DISTRIBUTED_ROLE": "worker",
+            "BANGERS_NODE_ID": spec.node_id,
+            "BANGERS_WORKER_CAPABILITIES": worker_capabilities,
+            "BANGERS_HOST": "127.0.0.1",
+            "BANGERS_PORT": str(spec.port),
+            "BANGERS_DEVICE": "cuda",
+            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+            "CUDA_VISIBLE_DEVICES": spec.gpu.selector,
+        }
+        worker = _popen(
+            backend_cmd,
+            cwd=BACKEND_DIR,
+            env=worker_env,
+        )
+        procs.append((f"Worker {spec.node_id}", worker))
 
     # Start frontend. We pass the pre-generated cert via `--experimental-https-*`
     # so Next.js skips its mkcert step entirely — that's important on headless
@@ -657,6 +1319,7 @@ def main() -> None:
     # which then misreads `--experimental-https` as a project directory.
     frontend_cmd = [
         "pnpm", "exec", "next", "dev",
+        "--hostname", "0.0.0.0",
         "--experimental-https",
         "--experimental-https-cert", str(cert_path),
         "--experimental-https-key", str(key_path),
@@ -667,6 +1330,7 @@ def main() -> None:
         env={
             **runtime_env,
             "NEXT_TELEMETRY_DISABLED": "1",
+            "NEXT_PUBLIC_BANGERS_BACKEND_PORT": str(backend_port),
             # SSR/RSC code paths in Next.js dial the backend with Node's
             # built-in fetch, which by default rejects our self-signed cert.
             # Disable the check inside the dev process only — never ship this
@@ -674,7 +1338,7 @@ def main() -> None:
             "NODE_TLS_REJECT_UNAUTHORIZED": "0",
         },
     )
-    procs.append(frontend)
+    procs.append(("Frontend", frontend))
 
     if not args.no_open:
         opener = threading.Thread(
@@ -689,10 +1353,9 @@ def main() -> None:
     # Wait for either process to exit
     try:
         while True:
-            for p in procs:
+            for name, p in procs:
                 ret = p.poll()
                 if ret is not None:
-                    name = "Backend" if p == backend else "Frontend"
                     log(f"{name} exited with code {ret}", RED if ret != 0 else YELLOW)
                     shutdown()
             time.sleep(0.5)

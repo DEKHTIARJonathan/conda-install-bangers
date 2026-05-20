@@ -1,4 +1,5 @@
 import { getBaseUrl, getWsUrl, request } from "./base";
+import { getClientId } from "@/lib/client-session";
 import type {
   HealthResponse,
   GenerateRequest,
@@ -66,7 +67,7 @@ export async function uploadAudio(file: File): Promise<UploadResponse> {
 export const submitGeneration = (params: GenerateRequest) =>
   request<GenerateResponse>("/generate", {
     method: "POST",
-    body: JSON.stringify(params),
+    body: JSON.stringify({ ...params, client_id: getClientId() }),
   });
 
 export const fetchJobStatus = (jobId: string) =>
@@ -263,7 +264,10 @@ export function createGenerationWebSocket(
   onError?: (err: Event) => void,
 ): WebSocket {
   const wsUrl = getWsUrl();
-  const ws = new WebSocket(`${wsUrl}/api/ws/generate`);
+  const url = new URL(`${wsUrl}/api/ws/generate`);
+  const clientId = getClientId();
+  if (clientId) url.searchParams.set("client_id", clientId);
+  const ws = new WebSocket(url.toString());
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data) as WsProgressMessage;
     onMessage(msg);

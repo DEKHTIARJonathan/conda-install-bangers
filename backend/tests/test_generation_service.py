@@ -205,6 +205,66 @@ async def test_generate_strips_verified_lyrics_pipeline_marker_before_backend():
 
 
 @pytest.mark.asyncio
+async def test_generate_delegates_to_remote_workers_when_configured(monkeypatch):
+    from bangers.config import settings
+    from bangers.services import distributed as distributed_module
+    from bangers.services.lyrics_pipeline import mark_lyrics_pipeline_prepared
+
+    service = GenerationService()
+    service.backend = _FakeBackend(ready=False)
+    captured: dict[str, Any] = {}
+
+    async def fake_remote_generate(
+        params: dict[str, Any],
+        *,
+        progress_callback: Callable | None = None,
+        lyrics_prepared: bool = False,
+    ) -> dict[str, Any]:
+        captured["params"] = dict(params)
+        captured["lyrics_prepared"] = lyrics_prepared
+        return {"success": True, "audios": [{"path": "remote.flac"}]}
+
+    old_role = settings.DISTRIBUTED_ROLE
+    old_workers = settings.DISTRIBUTED_WORKERS
+    try:
+        settings.DISTRIBUTED_ROLE = "coordinator"
+        settings.DISTRIBUTED_WORKERS = ("http://spark-a:8000",)
+        monkeypatch.setattr(
+            distributed_module.distributed_cluster,
+            "generate_on_remote_music_worker",
+            fake_remote_generate,
+        )
+
+        params = mark_lyrics_pipeline_prepared({
+            "caption": "remote clean song",
+            "lyrics": "[verse]\nAlready reviewed",
+            "instrumental": False,
+        })
+        result = await service.generate(params, lyrics_prepared=True)
+
+        assert result["success"] is True
+        assert captured["lyrics_prepared"] is True
+        assert captured["params"]["lyrics"] == "[verse]\nAlready reviewed"
+        assert all(not key.startswith("_lyrics_pipeline_") for key in captured["params"])
+        assert all(not key.startswith("_distributed_") for key in captured["params"])
+    finally:
+        settings.DISTRIBUTED_ROLE = old_role
+        settings.DISTRIBUTED_WORKERS = old_workers
+
+
+def test_public_params_strips_distributed_internal_keys():
+    service = GenerationService()
+
+    public = service.public_params({
+        "caption": "x",
+        "_distributed_lyrics_prepared": True,
+        "_distributed_ace_lm_worker": "spark-b",
+    })
+
+    assert public == {"caption": "x"}
+
+
+@pytest.mark.asyncio
 async def test_generate_fails_closed_when_guardrail_llm_unavailable():
     service = GenerationService()
     service.backend = _FakeBackend(ready=True)

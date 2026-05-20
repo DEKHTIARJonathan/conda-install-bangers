@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from loguru import logger
 
+from bangers.config import DISTRIBUTED_CAPABILITY_CHAT_LLM, settings
 from bangers.db.connection import get_db
 from bangers.services.llm_provider import ChatRuntime, get_chat_runtime, loaded_chat_model_name
 
@@ -31,8 +32,19 @@ async def get_configured_chat_runtime() -> tuple[ChatRuntime | None, str]:
     model_name = await get_configured_chat_model_name()
     if not model_name:
         return (None, "")
+    if (
+        settings.delegates_to_workers
+        and not settings.has_distributed_capability(DISTRIBUTED_CAPABILITY_CHAT_LLM)
+    ):
+        from bangers.services.distributed import remote_chat_runtime
+
+        return (remote_chat_runtime, model_name)
     runtime = get_chat_runtime(model_name)
     if runtime is None or not runtime.is_model_loadable(model_name):
+        if settings.delegates_to_workers:
+            from bangers.services.distributed import remote_chat_runtime
+
+            return (remote_chat_runtime, model_name)
         return (None, model_name)
     return (runtime, model_name)
 
@@ -74,23 +86,57 @@ async def warm_chat_model(
     *,
     allow_holders: frozenset[str] | None = None,
 ) -> None:
+    warmup_messages = [
+        {
+            "role": "system",
+            "content": "You are a model warmup probe. Reply with OK only.",
+        },
+        {"role": "user", "content": "OK"},
+    ]
+    if (
+        settings.delegates_to_workers
+        and not settings.has_distributed_capability(DISTRIBUTED_CAPABILITY_CHAT_LLM)
+    ):
+        from bangers.services.distributed import remote_chat_runtime
+
+        await remote_chat_runtime.chat(
+            warmup_messages,
+            model=model_name,
+            max_tokens=4,
+            temperature=0.0,
+        )
+        return
     runtime = get_chat_runtime(model_name)
     if runtime is None:
+        if settings.delegates_to_workers:
+            from bangers.services.distributed import remote_chat_runtime
+
+            await remote_chat_runtime.chat(
+                warmup_messages,
+                model=model_name,
+                max_tokens=4,
+                temperature=0.0,
+            )
+            return
         raise ChatLlmUnavailable(
             f"Chat LLM '{model_name}' requires a runtime that is not available on this machine."
         )
     if not runtime.is_model_loadable(model_name):
+        if settings.delegates_to_workers:
+            from bangers.services.distributed import remote_chat_runtime
+
+            await remote_chat_runtime.chat(
+                warmup_messages,
+                model=model_name,
+                max_tokens=4,
+                temperature=0.0,
+            )
+            return
         raise ChatLlmUnavailable(
             f"Chat LLM '{model_name}' is not installed. Download it before loading."
         )
     await runtime.chat(
-        [
-            {
-                "role": "system",
-                "content": "You are a model warmup probe. Reply with OK only.",
-            },
-            {"role": "user", "content": "OK"},
-        ],
+        warmup_messages,
         model=model_name,
         max_tokens=4,
         temperature=0.0,
