@@ -4,6 +4,7 @@ import pytest
 def _reset_settings(monkeypatch):
     for name in [
         "BANGERS_BATCH_SIZE",
+        "BANGERS_LM_BACKEND",
         "BANGERS_THINKING",
         "BANGERS_MODEL_CACHE_DIR",
         "BANGERS_DISTRIBUTED_ROLE",
@@ -69,6 +70,30 @@ def test_db_default_overrides_does_not_seed_models(monkeypatch):
         assert defaults["keep_active_models_resident"] == "true"
         assert defaults["parallel_pipeline_enabled"] == "false"
         assert defaults["lyrics_guardrails_enabled"] == "true"
+    finally:
+        _reset_settings(monkeypatch)
+
+
+def test_lm_backend_defaults_to_vllm_alias_on_linux(monkeypatch):
+    import sys
+
+    from bangers.config import normalize_lm_backend, settings
+
+    try:
+        _reset_settings(monkeypatch)
+
+        assert normalize_lm_backend("nano-vllm") == "vllm"
+        assert normalize_lm_backend("nano_vllm") == "vllm"
+        assert normalize_lm_backend("nanovllm") == "vllm"
+        assert normalize_lm_backend("VLLM") == "vllm"
+        if sys.platform != "darwin":
+            assert settings.DEFAULT_LM_BACKEND == "vllm"
+            assert normalize_lm_backend("mlx") == "vllm"
+
+        monkeypatch.setenv("BANGERS_LM_BACKEND", "nano-vllm")
+        settings.apply_runtime_overrides()
+        assert settings.DEFAULT_LM_BACKEND == "vllm"
+        assert settings.startup_setting_overrides()["lm_backend"] == "vllm"
     finally:
         _reset_settings(monkeypatch)
 

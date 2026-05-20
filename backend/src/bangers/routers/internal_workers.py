@@ -11,6 +11,7 @@ from bangers.config import (
     DISTRIBUTED_CAPABILITY_ACE_LM,
     DISTRIBUTED_CAPABILITY_CHAT_LLM,
     DISTRIBUTED_CAPABILITY_MUSIC,
+    normalize_lm_backend,
     settings,
 )
 from bangers.db.connection import get_db
@@ -234,7 +235,7 @@ async def switch_worker_lm_model(
     _check_worker_token(x_bangers_worker_token)
     if DISTRIBUTED_CAPABILITY_ACE_LM not in settings.DISTRIBUTED_CAPABILITIES:
         raise HTTPException(status_code=409, detail="This worker does not advertise ACE LM capability")
-    runtime = request.runtime or settings.DEFAULT_LM_BACKEND
+    runtime = normalize_lm_backend(request.runtime or settings.DEFAULT_LM_BACKEND)
     await _persist_setting("lm_model", request.model_name)
     await _persist_setting("lm_backend", runtime)
     generation_service._set_loading("lm", request.model_name)

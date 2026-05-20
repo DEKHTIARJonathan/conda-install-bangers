@@ -17,6 +17,7 @@ from bangers.config import (
     DISTRIBUTED_CAPABILITY_ACE_LM,
     DISTRIBUTED_CAPABILITY_CHAT_LLM,
     DISTRIBUTED_CAPABILITY_MUSIC,
+    normalize_lm_backend,
     settings,
 )
 from bangers.db.connection import init_db, close_db
@@ -129,10 +130,12 @@ async def lifespan(app: FastAPI):
 
         dit_model = saved.get("dit_model", "")
         lm_model = saved.get("lm_model", "")
-        lm_backend = saved.get("lm_backend", settings.DEFAULT_LM_BACKEND)
-        if lm_backend == "mlx" and sys.platform != "darwin":
-            lm_backend = "nano-vllm"
-            logger.info("Overriding saved lm_backend 'mlx' -> 'nano-vllm' (mlx requires macOS)")
+        requested_lm_backend = saved.get("lm_backend", settings.DEFAULT_LM_BACKEND)
+        lm_backend = normalize_lm_backend(requested_lm_backend)
+        if lm_backend != requested_lm_backend:
+            logger.info(
+                f"Using ACE LM backend '{lm_backend}' for configured runtime '{requested_lm_backend}'"
+            )
 
         # Clamp LM model to GPU tier's supported list, downloading if needed
         if load_ace_lm and lm_model and not settings.is_lm_disabled(lm_model) and sys.platform != "darwin":

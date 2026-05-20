@@ -6,7 +6,7 @@ from pathlib import Path
 from bangers.model_registry import is_lm_disabled
 
 
-DEFAULT_LM_BACKEND = "mlx" if sys.platform == "darwin" else "nano-vllm"
+DEFAULT_LM_BACKEND = "mlx" if sys.platform == "darwin" else "vllm"
 DEFAULT_DEVICE = "auto"
 DEFAULT_AUDIO_FORMAT = "flac"
 DEFAULT_BATCH_SIZE = 2
@@ -57,6 +57,18 @@ def _parse_csv(value: str) -> tuple[str, ...]:
 def _parse_capabilities(value: str) -> frozenset[str]:
     requested = {part.lower() for part in _parse_csv(value)}
     return frozenset(requested & DISTRIBUTED_CAPABILITIES)
+
+
+def normalize_lm_backend(backend: str | None) -> str:
+    """Return the ACE-Step backend name for a configured LM runtime."""
+    value = (backend or DEFAULT_LM_BACKEND).strip().lower()
+    if not value:
+        value = DEFAULT_LM_BACKEND
+    if value in {"nano-vllm", "nano_vllm", "nanovllm"}:
+        value = "vllm"
+    if value == "mlx" and sys.platform != "darwin":
+        value = "vllm"
+    return value
 
 
 class Settings:
@@ -120,9 +132,8 @@ class Settings:
         os.environ.setdefault("HF_HOME", str(self.HF_HOME_DIR))
         os.environ.setdefault("HF_HUB_CACHE", str(self.HF_HUB_CACHE_DIR))
 
-        self.DEFAULT_LM_BACKEND = _getenv(
-            "BANGERS_LM_BACKEND",
-            DEFAULT_LM_BACKEND,
+        self.DEFAULT_LM_BACKEND = normalize_lm_backend(
+            _getenv("BANGERS_LM_BACKEND", DEFAULT_LM_BACKEND)
         )
         self.DEFAULT_DEVICE = _getenv("BANGERS_DEVICE", DEFAULT_DEVICE)
 

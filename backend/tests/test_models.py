@@ -170,6 +170,33 @@ async def test_switch_model_rejected_while_another_model_is_loading(client):
 
 
 @pytest.mark.asyncio
+async def test_switch_lm_normalizes_legacy_nanovllm_runtime(client, monkeypatch):
+    from bangers.db.connection import get_db
+    from bangers.services.generation import generation_service
+
+    calls: list[dict] = []
+
+    async def fake_initialize_lm(**kwargs):
+        calls.append(kwargs)
+        return "ready", True
+
+    monkeypatch.setattr(generation_service, "initialize_lm", fake_initialize_lm)
+
+    response = await client.post(
+        "/api/models/switch-lm",
+        json={"model_name": "acestep-5Hz-lm-0.6B", "runtime": "nano-vllm"},
+    )
+
+    assert response.status_code == 200
+    assert calls[0]["backend"] == "vllm"
+
+    db = await get_db()
+    async with db.execute("SELECT value FROM settings WHERE key = 'lm_backend'") as cursor:
+        row = await cursor.fetchone()
+    assert row["value"] == "vllm"
+
+
+@pytest.mark.asyncio
 async def test_switch_chat_llm_loads_and_persists_model(client, monkeypatch):
     from bangers.db.connection import get_db
     from bangers.routers import models as models_router

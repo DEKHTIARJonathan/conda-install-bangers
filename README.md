@@ -111,7 +111,8 @@ also loads a repo-root `.env` file before starting processes:
 | `BANGERS_HOST` | `0.0.0.0` | Backend bind address |
 | `BANGERS_PORT` | `8000` | Backend port |
 | `BANGERS_DEVICE` | `auto` | `auto`, `cuda`, `mps`, or `cpu` |
-| `BANGERS_LM_BACKEND` | `mlx` on macOS, `nano-vllm` elsewhere | ACE LM backend |
+| `BANGERS_LM_BACKEND` | `mlx` on macOS, `vllm` elsewhere | ACE LM backend |
+| `BANGERS_VLLM_ENFORCE_EAGER` | `auto` | Force nano-vLLM eager mode (`true`/`false`/`auto`) |
 | `BANGERS_AUDIO_FORMAT` | `flac` | Default output format |
 | `BANGERS_BATCH_SIZE` | `2` | Default samples per generation |
 | `BANGERS_INFERENCE_STEPS` | `8` | Default DiT steps |

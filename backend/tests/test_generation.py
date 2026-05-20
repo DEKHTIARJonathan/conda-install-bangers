@@ -1,5 +1,7 @@
 import asyncio
 import json
+import sys
+import types
 from typing import Any, Callable
 
 import pytest
@@ -64,6 +66,76 @@ def test_generation_cancelled_bypasses_broad_exception_handlers():
             raise GenerationCancelled()
         except Exception as exc:
             pytest.fail(f"Cancellation should not be handled as a generation failure: {exc!r}")
+
+
+@pytest.mark.asyncio
+async def test_ace_lm_initialization_maps_nanovllm_alias_to_vllm(monkeypatch, tmp_path):
+    from bangers.backends.ace_step_backend import AceStepBackend
+    from bangers.config import settings
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeLLMHandler:
+        def initialize(self, **kwargs):
+            calls.append(kwargs)
+            return "ready", True
+
+    llm_module = types.ModuleType("acestep.llm_inference")
+    llm_module.LLMHandler = FakeLLMHandler
+    monkeypatch.setitem(sys.modules, "acestep.llm_inference", llm_module)
+
+    old_root = settings.ACESTEP_PROJECT_ROOT
+    try:
+        settings.ACESTEP_PROJECT_ROOT = str(tmp_path)
+        ace = AceStepBackend()
+
+        status, ok = await ace.initialize_lm(
+            lm_model_path="acestep-5Hz-lm-0.6B",
+            backend="nano-vllm",
+            device="cuda",
+        )
+
+        assert (status, ok) == ("ready", True)
+        assert calls[0]["backend"] == "vllm"
+    finally:
+        settings.ACESTEP_PROJECT_ROOT = old_root
+
+
+def test_vllm_eager_wrapper_auto_enables_for_gb10(monkeypatch):
+    from bangers.backends.ace_step_backend import _install_vllm_eager_wrapper
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def current_device():
+            return 0
+
+        @staticmethod
+        def get_device_name(_device):
+            return "NVIDIA GB10"
+
+        @staticmethod
+        def get_device_capability(_device):
+            return (12, 1)
+
+    class FakeHandler:
+        def _initialize_5hz_lm_vllm(self, model_path, enforce_eager=False):
+            calls.append({"model_path": model_path, "enforce_eager": enforce_eager})
+            return "ready"
+
+    monkeypatch.delenv("BANGERS_VLLM_ENFORCE_EAGER", raising=False)
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=FakeCuda()))
+
+    handler = FakeHandler()
+    _install_vllm_eager_wrapper(handler, "cuda")
+
+    assert handler._initialize_5hz_lm_vllm("model") == "ready"
+    assert calls == [{"model_path": "model", "enforce_eager": True}]
 
 
 @pytest.mark.asyncio

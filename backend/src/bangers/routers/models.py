@@ -9,7 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from bangers.config import settings
+from bangers.config import normalize_lm_backend, settings
 from bangers.model_registry import (
     ACE_DIT_MODELS,
     ACE_LM_MODELS,
@@ -461,7 +461,7 @@ async def switch_lm_model(request: SwitchModelRequest) -> dict[str, str]:
 
     try:
         db = await get_db()
-        runtime = request.runtime or settings.DEFAULT_LM_BACKEND
+        runtime = normalize_lm_backend(request.runtime or settings.DEFAULT_LM_BACKEND)
         await db.execute(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))",
             ("lm_model", request.model_name),
