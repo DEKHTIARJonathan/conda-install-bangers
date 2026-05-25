@@ -114,6 +114,81 @@ async def test_generate_song_spec_retries_generated_lyrics_after_guardrail_rejec
 
 
 @pytest.mark.asyncio
+async def test_format_song_spec_allows_empty_lyrics_for_instrumental(monkeypatch):
+    from bangers.services import lyrics_pipeline
+
+    async def fake_chat(*_args, **_kwargs):
+        return (
+            '{"caption":"Energetic synthwave instrumental","lyrics":"",'
+            '"bpm":128,"duration":200,"keyscale":"","language":"en",'
+            '"timesignature":"4/4"}'
+        )
+
+    async def fail_review(*_args, **_kwargs):
+        raise AssertionError("instrumental lyrics should not be reviewed")
+
+    monkeypatch.setattr(lyrics_pipeline.chat_llm, "chat", fake_chat)
+    monkeypatch.setattr(lyrics_pipeline, "review_lyrics_if_enabled", fail_review)
+
+    result = await lyrics_pipeline.format_song_spec(
+        "synthwave instrumental",
+        "",
+        user_metadata={"instrumental": True},
+    )
+
+    assert result["success"] is True
+    assert result["lyrics"] == ""
+    assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_format_song_spec_allows_empty_lyrics_for_vocal_formatting(monkeypatch):
+    from bangers.services import lyrics_pipeline
+
+    async def fake_chat(*_args, **_kwargs):
+        return (
+            '{"caption":"Energetic synthwave vocal","lyrics":"",'
+            '"bpm":128,"duration":200,"keyscale":"","language":"en",'
+            '"timesignature":"4/4"}'
+        )
+
+    monkeypatch.setattr(lyrics_pipeline.chat_llm, "chat", fake_chat)
+
+    result = await lyrics_pipeline.format_song_spec(
+        "synthwave vocal",
+        "",
+        user_metadata={"instrumental": False},
+    )
+
+    assert result["success"] is True
+    assert result["lyrics"] == ""
+    assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_format_song_spec_rejects_placeholder_lyrics_text(monkeypatch):
+    from bangers.services import lyrics_pipeline
+
+    async def fake_chat(*_args, **_kwargs):
+        return (
+            '{"caption":"Energetic synthwave vocal","lyrics":"[verse]\\n...",'
+            '"bpm":128,"duration":200,"keyscale":"","language":"en",'
+            '"timesignature":"4/4"}'
+        )
+
+    monkeypatch.setattr(lyrics_pipeline.chat_llm, "chat", fake_chat)
+
+    result = await lyrics_pipeline.format_song_spec(
+        "synthwave vocal",
+        "",
+        user_metadata={"instrumental": False},
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "Chat LLM returned placeholder lyrics."
+
+
+@pytest.mark.asyncio
 async def test_prepare_generation_params_generates_missing_vocal_lyrics(monkeypatch):
     from bangers.services import lyrics_pipeline
 

@@ -723,6 +723,7 @@ async def format_caption(request: FormatRequest) -> FormatResponse:
             user_metadata["keyscale"] = request.keyscale
         if request.timesignature:
             user_metadata["timesignature"] = request.timesignature
+        user_metadata["instrumental"] = request.instrumental
         user_metadata["duration"] = await get_default_duration()
         user_metadata["language"] = "en"
 

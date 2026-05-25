@@ -344,6 +344,7 @@ async def format_song_spec(
     allow_holders: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     metadata = user_metadata or {}
+    instrumental = coerce_instrumental(metadata.get("instrumental", False))
     messages = [
         {
             "role": "system",
@@ -396,10 +397,10 @@ async def format_song_spec(
         }
 
     formatted_caption = str(parsed.get("caption") or caption).strip()
-    formatted_lyrics = str(parsed.get("lyrics") or lyrics).strip()
+    formatted_lyrics = "" if instrumental else str(parsed.get("lyrics") or lyrics).strip()
     if _looks_like_placeholder_caption(formatted_caption):
         formatted_caption = caption
-    if _looks_like_placeholder_lyrics(formatted_lyrics):
+    if formatted_lyrics and _looks_like_placeholder_lyrics(formatted_lyrics):
         return {
             "caption": formatted_caption,
             "lyrics": lyrics,
@@ -412,11 +413,12 @@ async def format_song_spec(
             "error": "Chat LLM returned placeholder lyrics.",
         }
     try:
-        formatted_lyrics = await review_lyrics_if_enabled(
-            formatted_lyrics,
-            caption=formatted_caption,
-            allow_holders=allow_holders,
-        )
+        if formatted_lyrics:
+            formatted_lyrics = await review_lyrics_if_enabled(
+                formatted_lyrics,
+                caption=formatted_caption,
+                allow_holders=allow_holders,
+            )
     except Exception as exc:
         return {
             "caption": formatted_caption,

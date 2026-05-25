@@ -3,7 +3,8 @@
 Each chat model carries a `compatible_runtimes` tuple in
 :mod:`bangers.model_registry`. This module exposes a single
 :func:`get_chat_runtime` that returns the correct backend instance
-(MLX on Apple Silicon, Transformers elsewhere) based on that metadata.
+(MLX on Apple Silicon, Transformers elsewhere, or an external
+TensorRT-LLM OpenAI-compatible server) based on that metadata.
 
 There is no user-facing 'provider' selection any more: the user only
 picks a chat model on the Models page, and the runtime is derived
@@ -11,15 +12,18 @@ from the model itself.
 """
 
 import asyncio
+import json
 import sys
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 from loguru import logger
 
-from bangers.model_registry import CHAT_LLM_BY_NAME, chat_runtime_for
+from bangers.model_registry import CHAT_LLM_BY_NAME, CHAT_LLM_REGISTRY, chat_runtime_for
 
 
 class ChatRuntime(ABC):
@@ -52,9 +56,189 @@ class ChatRuntime(ABC):
         ``ChatRuntimeBusy`` against themselves.
         """
 
+    def unload(self) -> None:
+        """Release any resident local model resources held by this runtime."""
+
 
 class ChatRuntimeBusy(RuntimeError):
     """Raised when a GPU-backed chat model should be retried later."""
+
+
+class TrtLlmServerUnavailable(RuntimeError):
+    """Raised when an external TRT-LLM server cannot serve a selected model."""
+
+    def __init__(
+        self,
+        model_name: str,
+        command: str,
+        server_url: str,
+        reason: str | None = None,
+    ) -> None:
+        self.model_name = model_name
+        self.command = command
+        self.server_url = server_url
+        message = (
+            f"TRT-LLM server is not running {model_name} at {server_url}. "
+            f"Start the matching server with `{command}` and try again."
+        )
+        if reason:
+            message = f"{message} ({reason})"
+        super().__init__(message)
+
+
+def trtllm_serve_command_for(model_name: str) -> str:
+    metadata = CHAT_LLM_BY_NAME.get(model_name)
+    if metadata is not None and metadata.serve_command:
+        return metadata.serve_command
+    task_name = model_name.lower().replace("_", "-")
+    return f"mise run trtllm:{task_name}"
+
+
+class TrtLlmChatRuntime(ChatRuntime):
+    """External TensorRT-LLM OpenAI-compatible chat runtime."""
+
+    def __init__(self) -> None:
+        self._loaded_model_name = ""
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def runtime_supported() -> bool:
+        return sys.platform.startswith("linux")
+
+    @property
+    def _chat_llm_dir(self) -> Path:
+        from bangers.config import settings
+
+        return Path(settings.ACESTEP_PROJECT_ROOT) / "chat-llm"
+
+    def _model_installed(self, model_name: str) -> bool:
+        if not model_name:
+            return False
+        config = self._chat_llm_dir / model_name / "config.json"
+        return config.exists()
+
+    def loaded_model_name(self) -> str:
+        return self._loaded_model_name
+
+    async def is_available(self) -> bool:
+        return self.runtime_supported()
+
+    def is_model_loadable(self, model_name: str) -> bool:
+        return self.runtime_supported() and self._model_installed(model_name)
+
+    def _unavailable(self, model_name: str, reason: str | None = None) -> TrtLlmServerUnavailable:
+        from bangers.config import settings
+
+        return TrtLlmServerUnavailable(
+            model_name=model_name,
+            command=trtllm_serve_command_for(model_name),
+            server_url=settings.TRTLLM_SERVER_URL,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _endpoint(path: str) -> str:
+        from bangers.config import settings
+
+        return f"{settings.TRTLLM_SERVER_URL}{path}"
+
+    @staticmethod
+    def _timeout() -> float:
+        from bangers.config import settings
+
+        return settings.TRTLLM_TIMEOUT_SECONDS
+
+    def _request_json(
+        self,
+        model_name: str,
+        path: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        data = None
+        headers: dict[str, str] = {}
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urlrequest.Request(
+            self._endpoint(path),
+            data=data,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urlrequest.urlopen(request, timeout=self._timeout()) as response:
+                body = response.read().decode("utf-8")
+        except urlerror.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            reason = f"HTTP {exc.code}" + (f": {detail}" if detail else "")
+            raise self._unavailable(model_name, reason) from exc
+        except (TimeoutError, OSError, urlerror.URLError) as exc:
+            raise self._unavailable(model_name, str(exc)) from exc
+        if not body:
+            return {}
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            if path == "/health":
+                return {"raw": body}
+            raise RuntimeError(f"TRT-LLM server returned invalid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError("TRT-LLM server returned an invalid JSON payload.")
+        return parsed
+
+    def _chat_sync(
+        self,
+        messages: list[dict[str, str]],
+        model_name: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        with self._lock:
+            self._request_json(model_name, "/health")
+            payload: dict[str, Any] = {
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            response = self._request_json(
+                model_name,
+                "/v1/chat/completions",
+                method="POST",
+                payload=payload,
+            )
+            try:
+                choice = response["choices"][0]
+                message = choice.get("message") if isinstance(choice, dict) else None
+                if isinstance(message, dict):
+                    content = message.get("content", "")
+                else:
+                    content = choice.get("text", "")
+            except (KeyError, IndexError, AttributeError) as exc:
+                raise RuntimeError("TRT-LLM server returned no chat completion.") from exc
+            if not isinstance(content, str):
+                raise RuntimeError("TRT-LLM server returned non-text chat content.")
+            self._loaded_model_name = model_name
+            return content
+
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        *,
+        allow_holders: frozenset[str] | None = None,
+    ) -> str:
+        del allow_holders
+        if not self._model_installed(model):
+            raise RuntimeError(f"Chat model '{model}' is not installed.")
+        logger.info(f"LLM chat [trtllm] model={model} temp={temperature}")
+        return await asyncio.to_thread(
+            self._chat_sync, messages, model, max_tokens, temperature
+        )
 
 
 class MLXChatRuntime(ChatRuntime):
@@ -87,6 +271,11 @@ class MLXChatRuntime(ChatRuntime):
 
     def loaded_model_name(self) -> str:
         return self._loaded_model_name if self._model is not None else ""
+
+    def unload(self) -> None:
+        self._model = None
+        self._tokenizer = None
+        self._loaded_model_name = ""
 
     async def is_available(self) -> bool:
         return self.runtime_supported()
@@ -203,6 +392,25 @@ class TransformersChatRuntime(ChatRuntime):
     def loaded_model_name(self) -> str:
         return self._loaded_model_name if self._model is not None else ""
 
+    def unload(self) -> None:
+        if self._model is None and self._tokenizer is None:
+            self._loaded_model_name = ""
+            return
+        logger.info("Unloading Transformers chat model")
+        self._model = None
+        self._tokenizer = None
+        self._loaded_model_name = ""
+        import gc
+
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            logger.debug(f"Failed to clear CUDA cache after chat unload: {exc}")
+
     async def is_available(self) -> bool:
         return self.runtime_supported()
 
@@ -316,6 +524,7 @@ class TransformersChatRuntime(ChatRuntime):
 
 _mlx_runtime = MLXChatRuntime()
 _transformers_runtime = TransformersChatRuntime()
+_trtllm_runtime = TrtLlmChatRuntime()
 
 
 def get_chat_runtime(model_name: str) -> Optional[ChatRuntime]:
@@ -328,6 +537,8 @@ def get_chat_runtime(model_name: str) -> Optional[ChatRuntime]:
     if not model_name:
         return None
     runtime_kind = chat_runtime_for(model_name)
+    if runtime_kind == "trtllm":
+        return _trtllm_runtime if _trtllm_runtime.runtime_supported() else None
     if runtime_kind == "mlx":
         return _mlx_runtime if _mlx_runtime.runtime_supported() else None
     return _transformers_runtime if _transformers_runtime.runtime_supported() else None
@@ -344,6 +555,8 @@ def installed_chat_models() -> list[str]:
         if not entry.is_dir() or not (entry / "config.json").exists():
             continue
         name = entry.name
+        if name not in CHAT_LLM_REGISTRY:
+            continue
         runtime = get_chat_runtime(name)
         if runtime is None:
             continue
@@ -352,9 +565,14 @@ def installed_chat_models() -> list[str]:
 
 
 def loaded_chat_model_name() -> str:
-    """Return the Chat LLM currently loaded in memory, if any."""
-    for runtime in (_mlx_runtime, _transformers_runtime):
+    """Return the Chat LLM currently loaded or externally warmed, if any."""
+    for runtime in (_mlx_runtime, _transformers_runtime, _trtllm_runtime):
         loaded = runtime.loaded_model_name()
         if loaded:
             return loaded
     return ""
+
+
+def unload_embedded_chat_models() -> None:
+    """Release local chat runtimes after switching to external TRT-LLM."""
+    _transformers_runtime.unload()

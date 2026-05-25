@@ -82,7 +82,9 @@ function ModelCompatibilityBadges({
 }: {
   model: Pick<ModelInfo, "compatibility" | "quantization">;
 }) {
-  const compatibility = (model.compatibility ?? []).filter((runtime) => runtime === "mlx");
+  const compatibility = (model.compatibility ?? []).filter((runtime) =>
+    runtime === "mlx" || runtime === "trtllm",
+  );
   return (
     <>
       {compatibility.map((runtime) => (

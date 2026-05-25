@@ -208,6 +208,117 @@ async def test_switch_chat_llm_loads_and_persists_model(client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_switch_trtllm_model_warms_persists_and_unloads_transformers(client, monkeypatch):
+    from bangers.config import settings
+    from bangers.db.connection import get_db
+    from bangers.services import chat_llm
+
+    chat_dir = settings.MODEL_CACHE_DIR / "chat-llm" / "Qwen3-8B-NVFP4"
+    chat_dir.mkdir(parents=True)
+    (chat_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    class FakeTrtRuntime:
+        def is_model_loadable(self, model_name: str) -> bool:
+            return model_name == "Qwen3-8B-NVFP4"
+
+        async def chat(self, messages, model, max_tokens=1024, temperature=0.0, *, allow_holders=None):
+            assert model == "Qwen3-8B-NVFP4"
+            assert max_tokens == 4
+            assert messages[-1]["content"] == "OK"
+            return "OK"
+
+    unload_calls: list[str] = []
+    monkeypatch.setattr(chat_llm, "get_chat_runtime", lambda _model_name: FakeTrtRuntime())
+    monkeypatch.setattr(chat_llm, "unload_embedded_chat_models", lambda: unload_calls.append("unloaded"))
+
+    response = await client.post(
+        "/api/models/switch-chat-llm",
+        json={"model_name": "Qwen3-8B-NVFP4"},
+    )
+
+    assert response.status_code == 200
+    assert unload_calls == ["unloaded"]
+
+    db = await get_db()
+    cursor = await db.execute("SELECT value FROM settings WHERE key = 'dj_model'")
+    row = await cursor.fetchone()
+    assert row["value"] == "Qwen3-8B-NVFP4"
+
+
+@pytest.mark.asyncio
+async def test_switch_trtllm_model_server_down_does_not_persist_and_returns_command(client, monkeypatch):
+    from bangers.config import settings
+    from bangers.db.connection import get_db
+    from bangers.services import chat_llm
+    from bangers.services.llm_provider import TrtLlmServerUnavailable
+
+    chat_dir = settings.MODEL_CACHE_DIR / "chat-llm" / "Qwen3-8B-NVFP4"
+    chat_dir.mkdir(parents=True)
+    (chat_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    db = await get_db()
+    await db.execute(
+        "INSERT OR REPLACE INTO settings (key, value, updated_at) "
+        "VALUES ('dj_model', 'Qwen3-1.7B', datetime('now'))"
+    )
+    await db.commit()
+
+    class DownTrtRuntime:
+        def is_model_loadable(self, model_name: str) -> bool:
+            return model_name == "Qwen3-8B-NVFP4"
+
+        async def chat(self, *_args, **_kwargs):
+            raise TrtLlmServerUnavailable(
+                "Qwen3-8B-NVFP4",
+                "mise run trtllm:qwen3-8b-nvfp4",
+                settings.TRTLLM_SERVER_URL,
+            )
+
+    monkeypatch.setattr(chat_llm, "get_chat_runtime", lambda _model_name: DownTrtRuntime())
+
+    response = await client.post(
+        "/api/models/switch-chat-llm",
+        json={"model_name": "Qwen3-8B-NVFP4"},
+    )
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["error"] == "trtllm_server_unavailable"
+    assert detail["command"] == "mise run trtllm:qwen3-8b-nvfp4"
+    assert "TRT-LLM server is not running" in detail["message"]
+
+    cursor = await db.execute("SELECT value FROM settings WHERE key = 'dj_model'")
+    row = await cursor.fetchone()
+    assert row["value"] == "Qwen3-1.7B"
+
+
+@pytest.mark.asyncio
+async def test_switch_transformers_chat_model_does_not_unload_external_trt(client, monkeypatch):
+    from bangers.services import chat_llm
+
+    class FakeTransformersRuntime:
+        def is_model_loadable(self, model_name: str) -> bool:
+            return model_name == "Qwen3-1.7B"
+
+        async def chat(self, *_args, **_kwargs):
+            return "OK"
+
+    monkeypatch.setattr(chat_llm, "get_chat_runtime", lambda _model_name: FakeTransformersRuntime())
+
+    def fail_unload():
+        raise AssertionError("Transformers switches must not unload external TRT state")
+
+    monkeypatch.setattr(chat_llm, "unload_embedded_chat_models", fail_unload)
+
+    response = await client.post(
+        "/api/models/switch-chat-llm",
+        json={"model_name": "Qwen3-1.7B"},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_chat_llm_active_status_uses_loaded_runtime_not_persisted_setting(client, monkeypatch):
     from bangers.config import settings
     from bangers.db.connection import get_db
@@ -272,6 +383,26 @@ async def test_models_marks_current_ace_lm_load(client):
     assert lm_models[0]["name"] == "acestep-5Hz-lm-0.6B"
     assert lm_models[0]["is_active"] is False
     assert lm_models[0]["is_loading"] is True
+
+
+@pytest.mark.asyncio
+async def test_models_ignores_unregistered_chat_llm_cache_dirs(client):
+    from bangers.config import settings
+
+    registered_dir = settings.MODEL_CACHE_DIR / "chat-llm" / "Qwen3-8B-NVFP4"
+    registered_dir.mkdir(parents=True)
+    (registered_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    unknown_dir = settings.MODEL_CACHE_DIR / "chat-llm" / "Qwen3-1.7B-TensorRT-LLM-NVFP4"
+    unknown_dir.mkdir(parents=True)
+    (unknown_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    response = await client.get("/api/models")
+
+    assert response.status_code == 200
+    names = [model["name"] for model in response.json()["chat_llm_models"]]
+    assert "Qwen3-8B-NVFP4" in names
+    assert "Qwen3-1.7B-TensorRT-LLM-NVFP4" not in names
 
 
 @pytest.mark.asyncio

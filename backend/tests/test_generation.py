@@ -220,6 +220,37 @@ async def test_format_when_lm_not_loaded(client):
 
 
 @pytest.mark.asyncio
+async def test_format_passes_instrumental_metadata(client, monkeypatch):
+    from bangers.routers import generation as generation_router
+
+    captured: dict[str, Any] = {}
+
+    async def fake_format_sample(**kwargs):
+        captured.update(kwargs)
+        return {
+            "caption": kwargs["caption"],
+            "lyrics": "",
+            "success": True,
+        }
+
+    monkeypatch.setattr(
+        generation_router.generation_service,
+        "format_sample",
+        fake_format_sample,
+    )
+
+    resp = await client.post("/api/format", json={
+        "caption": "instrumental synthwave",
+        "lyrics": "",
+        "instrumental": True,
+    })
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    assert captured["user_metadata"]["instrumental"] is True
+
+
+@pytest.mark.asyncio
 async def test_sample_when_lm_not_loaded(client):
     resp = await client.post("/api/sample", json={
         "query": "happy country song",

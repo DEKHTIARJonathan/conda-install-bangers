@@ -93,6 +93,7 @@ class JobStatusResponse(BaseModel):
 class FormatRequest(BaseModel):
     caption: str = ""
     lyrics: str = ""
+    instrumental: bool = False
     bpm: Optional[int] = None
     keyscale: str = ""
     timesignature: str = ""
