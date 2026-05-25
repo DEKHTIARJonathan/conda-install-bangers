@@ -52,6 +52,61 @@ echo "Fresh data directory ready: $data_dir"
 description = "Run the local backend and frontend without Docker"
 run = "python -u start.py"
 
+[tasks."trtllm:qwen3-8b-nvfp4"]
+description = "Run TensorRT-LLM OpenAI server for Qwen3-8B-NVFP4 on port 8010"
+run = """
+sudo docker run --rm \
+  --name bangers-trtllm-qwen3-8b-nvfp4 \
+  --gpus all \
+  --ipc=host \
+  -p 8010:8010 \
+  -v "{{config_root}}/.cache/models/chat-llm/Qwen3-8B-NVFP4:/models/Qwen3-8B-NVFP4:ro" \
+  -w /models \
+  nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc1 \
+  trtllm-serve serve Qwen3-8B-NVFP4 \
+    --host 0.0.0.0 \
+    --port 8010 \
+    --tp_size 1
+"""
+
+[tasks."trtllm:qwen3-14b-nvfp4"]
+description = "Run TensorRT-LLM OpenAI server for Qwen3-14B-NVFP4 on port 8010"
+run = """
+sudo docker run --rm \
+  --name bangers-trtllm-qwen3-14b-nvfp4 \
+  --gpus all \
+  --ipc=host \
+  -p 8010:8010 \
+  -v "{{config_root}}/.cache/models/chat-llm/Qwen3-14B-NVFP4:/models/Qwen3-14B-NVFP4:ro" \
+  -w /models \
+  nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc1 \
+  trtllm-serve serve Qwen3-14B-NVFP4 \
+    --host 0.0.0.0 \
+    --port 8010 \
+    --tp_size 1
+"""
+
+[tasks."trtllm:qwen3-30b-fp4"]
+description = "Run TensorRT-LLM OpenAI server for Qwen3-30B-FP4 on port 8010"
+run = """
+sudo docker run --rm \
+  --name bangers-trtllm-qwen3-30b-fp4 \
+  --gpus all \
+  --ipc=host \
+  -p 8010:8010 \
+  -v "{{config_root}}/.cache/models/chat-llm/Qwen3-30B-FP4:/models/Qwen3-30B-FP4:ro" \
+  -w /models \
+  nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc1 \
+  trtllm-serve serve Qwen3-30B-FP4 \
+    --host 0.0.0.0 \
+    --port 8010 \
+    --tp_size 1
+"""
+
+[tasks."dev:with-trt"]
+description = "Run the app against an externally managed TRT-LLM server on port 8010"
+run = "BANGERS_TRTLLM_MANAGED=false BANGERS_TRTLLM_SERVER_URL=http://127.0.0.1:8010 BANGERS_TRTLLM_TIMEOUT_SECONDS=120 python -u start.py"
+
 [tasks.test]
 description = "Run backend and frontend tests once"
 run = [

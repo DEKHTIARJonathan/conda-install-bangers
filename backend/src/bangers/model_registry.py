@@ -15,6 +15,7 @@ class DownloadableModel:
     format: str = ""
     quantization: str = ""
     trust_remote_code: bool = False
+    serve_command: str = ""
 
 
 def _chat_model(
@@ -26,6 +27,7 @@ def _chat_model(
     format: str,
     quantization: str,
     trust_remote_code: bool = False,
+    serve_command: str = "",
 ) -> DownloadableModel:
     return DownloadableModel(
         name=name,
@@ -37,6 +39,7 @@ def _chat_model(
         format=format,
         quantization=quantization,
         trust_remote_code=trust_remote_code,
+        serve_command=serve_command,
     )
 
 
@@ -137,6 +140,47 @@ CHAT_LLM_MODELS: tuple[DownloadableModel, ...] = (
         compatible_runtimes=(),
         format="Transformers",
         quantization="FP8",
+    ),
+    # ========================= [TensorRT-LLM] NVIDIA FP4/NVFP4 models ========================= #
+    _chat_model(
+        name="Qwen3-8B-NVFP4",
+        repo_id="nvidia/Qwen3-8B-NVFP4",
+        size_mb=5_500,
+        description=(
+            "NVIDIA Qwen3 8B NVFP4 checkpoint for an external TensorRT-LLM "
+            "OpenAI-compatible server. Requires Blackwell-class NVIDIA GPU."
+        ),
+        compatible_runtimes=("trtllm",),
+        format="TensorRT-LLM",
+        quantization="NVFP4",
+        serve_command="mise run trtllm:qwen3-8b-nvfp4",
+    ),
+    _chat_model(
+        name="Qwen3-14B-NVFP4",
+        repo_id="nvidia/Qwen3-14B-NVFP4",
+        size_mb=11_000,
+        description=(
+            "NVIDIA Qwen3 14B NVFP4 checkpoint for an external TensorRT-LLM "
+            "OpenAI-compatible server. Requires Blackwell-class NVIDIA GPU."
+        ),
+        compatible_runtimes=("trtllm",),
+        format="TensorRT-LLM",
+        quantization="NVFP4",
+        serve_command="mise run trtllm:qwen3-14b-nvfp4",
+    ),
+    _chat_model(
+        name="Qwen3-30B-FP4",
+        repo_id="nvidia/Qwen3-30B-A3B-NVFP4",
+        size_mb=22_000,
+        description=(
+            "NVIDIA Qwen3 30B A3B FP4 checkpoint for an external "
+            "TensorRT-LLM OpenAI-compatible server. Requires Blackwell-class "
+            "NVIDIA GPU."
+        ),
+        compatible_runtimes=("trtllm",),
+        format="TensorRT-LLM",
+        quantization="FP4",
+        serve_command="mise run trtllm:qwen3-30b-fp4",
     ),
     # # ========================= [Transformers] Qwen3.5 models ========================= #
     # _chat_model(
@@ -322,6 +366,9 @@ CHAT_LLM_FORMATS = {model.name: model.format for model in CHAT_LLM_MODELS}
 CHAT_LLM_QUANTIZATIONS = {
     model.name: model.quantization for model in CHAT_LLM_MODELS
 }
+CHAT_LLM_SERVE_COMMANDS = {
+    model.name: model.serve_command for model in CHAT_LLM_MODELS
+}
 
 ACE_MODELS: tuple[DownloadableAceModel, ...] = ACE_DIT_MODELS + ACE_LM_MODELS
 ACE_MODEL_BY_NAME: dict[str, DownloadableAceModel] = {
@@ -374,10 +421,13 @@ def chat_runtime_for(model_name: str) -> str:
     """Return which chat runtime should load `model_name`.
 
     Looks up `compatible_runtimes` in CHAT_LLM_BY_NAME. If 'mlx' is in the
-    tuple, returns 'mlx'; otherwise returns 'transformers'. Unknown models
-    default to 'transformers' so user-installed model folders still work.
+    tuple, returns 'trtllm' or 'mlx'; otherwise returns 'transformers'.
+    Unknown models default to 'transformers' so user-installed model folders
+    still work.
     """
     metadata = CHAT_LLM_BY_NAME.get(model_name)
     if metadata is None:
         return "transformers"
+    if "trtllm" in metadata.compatible_runtimes:
+        return "trtllm"
     return "mlx" if "mlx" in metadata.compatible_runtimes else "transformers"

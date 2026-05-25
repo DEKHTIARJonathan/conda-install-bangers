@@ -66,8 +66,14 @@ function extractErrorMessage(status: number, body: string): string {
       const detail = (parsed as { detail: unknown }).detail;
       if (typeof detail === "string") return detail;
       if (detail && typeof detail === "object" && "message" in detail) {
-        const message = (detail as { message: unknown }).message;
-        if (typeof message === "string") return message;
+        const detailRecord = detail as { message: unknown; command?: unknown };
+        const message = detailRecord.message;
+        if (typeof message === "string") {
+          const command = detailRecord.command;
+          return typeof command === "string" && command
+            ? `${message} Run: ${command}`
+            : message;
+        }
       }
     }
   } catch {

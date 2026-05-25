@@ -56,10 +56,19 @@ On first launch, no model is loaded. Open the **Models** page, download/select a
 ## Daily Commands
 
 ```bash
-mise run dev        # Start backend and frontend
+mise run dev        # Start backend and frontend only
 mise run test       # Run backend and frontend tests once
 mise run clean      # Reset local DB/audio/uploads, keep downloaded models
 ```
+
+TensorRT-LLM companion server flow on NVIDIA Linux hosts:
+
+```bash
+mise run trtllm:qwen3-8b-nvfp4   # Terminal 1: serve the FP4 chat model on :8010
+mise run dev:with-trt            # Terminal 2: start the app pointed at that server
+```
+
+Only one TRT-LLM chat model is served on port `8010` at a time. To switch TRT models, stop the current `trtllm:*` task and start the matching task before switching in the Models page.
 
 Launcher flags:
 
@@ -88,8 +97,11 @@ Current ACE model registry:
 | ACE language model | `acestep-5Hz-lm-1.7B`, `acestep-5Hz-lm-0.6B`, `acestep-5Hz-lm-4B`, or no LM |
 | Chat LLM, MLX | `Qwen3-0.6B-4bit`, `Qwen3-1.7B-4bit`, `Qwen3-4B-4bit`, `Qwen3-8B-4bit` |
 | Chat LLM, Transformers | `Qwen3-1.7B`, `Qwen3-4B-Instruct-2507`, `Qwen3-8B-FP8`, `Qwen3-14B-FP8`, `Qwen3-30B-A3B-Instruct-2507-FP8` |
+| Chat LLM, external TensorRT-LLM | `Qwen3-8B-NVFP4`, `Qwen3-14B-NVFP4`, `Qwen3-30B-FP4` |
 
 Disk usage depends on what you download. The default ACE bundle is about 10 GB, the XL DiT is about 20 GB, and larger chat LLMs add more.
+
+For TensorRT-LLM FP4 chat, the backend is an external client. Start the matching `mise run trtllm:*` task first, then use `mise run dev:with-trt` and switch to that same model in the Models page. The backend checks `/health` and sends a tiny warmup chat completion before saving `dj_model`; it does not launch or stop Docker in the normal app path. By default, keep either one embedded Transformers FP8 chat model or one external FP4 TRT-LLM model active, not both.
 
 Rough ACE LM guidance:
 
@@ -119,6 +131,9 @@ Common environment variables:
 | `BANGERS_DATA_DIR` | `backend/data` | SQLite DB, audio, uploads |
 | `BANGERS_MODEL_CACHE_DIR` | `.cache/models` | Model/cache root |
 | `ACESTEP_PROJECT_ROOT` | `.cache/models` | ACE checkpoints and chat LLM root |
+| `BANGERS_TRTLLM_MANAGED` | `false` | Keep TRT-LLM Docker lifecycle external to the app |
+| `BANGERS_TRTLLM_SERVER_URL` | `http://127.0.0.1:8010` | External TRT-LLM OpenAI-compatible server URL |
+| `BANGERS_TRTLLM_TIMEOUT_SECONDS` | `120` | Timeout for TRT-LLM health and chat requests |
 
 Most generation defaults can also be changed in the app under **Settings**.
 

@@ -67,6 +67,9 @@ class Settings:
     DEFAULT_INFERENCE_STEPS: int
     DEFAULT_GUIDANCE_SCALE: float
     DEFAULT_THINKING: bool
+    TRTLLM_MANAGED: bool
+    TRTLLM_SERVER_URL: str
+    TRTLLM_TIMEOUT_SECONDS: float
 
     def apply_runtime_overrides(self) -> None:
         """Refresh environment-backed settings."""
@@ -108,6 +111,16 @@ class Settings:
         self.DEFAULT_THINKING = _bool_string(
             _getenv("BANGERS_THINKING", _bool_string(DEFAULT_THINKING))
         ) == "true"
+        self.TRTLLM_MANAGED = _bool_string(
+            _getenv("BANGERS_TRTLLM_MANAGED", "false")
+        ) == "true"
+        self.TRTLLM_SERVER_URL = _getenv(
+            "BANGERS_TRTLLM_SERVER_URL",
+            "http://127.0.0.1:8010",
+        ).rstrip("/")
+        self.TRTLLM_TIMEOUT_SECONDS = float(
+            _getenv("BANGERS_TRTLLM_TIMEOUT_SECONDS", "120")
+        )
 
     @staticmethod
     def is_lm_disabled(model_name: str | None) -> bool:

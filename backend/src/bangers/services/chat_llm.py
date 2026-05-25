@@ -3,7 +3,14 @@ from __future__ import annotations
 from loguru import logger
 
 from bangers.db.connection import get_db
-from bangers.services.llm_provider import ChatRuntime, get_chat_runtime, loaded_chat_model_name
+from bangers.model_registry import chat_runtime_for
+from bangers.services.llm_provider import (
+    ChatRuntime,
+    TrtLlmServerUnavailable,
+    get_chat_runtime,
+    loaded_chat_model_name,
+    unload_embedded_chat_models,
+)
 
 
 CHAT_LLM_SETTING_KEY = "dj_model"
@@ -110,3 +117,5 @@ async def persist_chat_model(model_name: str) -> None:
 async def switch_chat_model(model_name: str) -> None:
     await warm_chat_model(model_name)
     await persist_chat_model(model_name)
+    if chat_runtime_for(model_name) == "trtllm":
+        unload_embedded_chat_models()

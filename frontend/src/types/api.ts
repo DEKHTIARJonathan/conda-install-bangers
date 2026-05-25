@@ -137,6 +137,7 @@ export interface WsProgressMessage {
 export interface FormatRequest {
   caption?: string;
   lyrics?: string;
+  instrumental?: boolean;
   bpm?: number | null;
   keyscale?: string;
   timesignature?: string;

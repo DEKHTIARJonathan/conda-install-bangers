@@ -43,6 +43,25 @@ describe("api client", () => {
     await expect(fetchHealth()).rejects.toThrow("API error 500");
   });
 
+  it("request includes backend command details in error messages", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      text: async () => JSON.stringify({
+        detail: {
+          error: "trtllm_server_unavailable",
+          message: "TRT-LLM server is not running",
+          command: "mise run trtllm:qwen3-8b-nvfp4",
+        },
+      }),
+    });
+
+    const { switchChatLlmModel } = await import("../client");
+    await expect(switchChatLlmModel("Qwen3-8B-NVFP4")).rejects.toThrow(
+      "TRT-LLM server is not running Run: mise run trtllm:qwen3-8b-nvfp4",
+    );
+  });
+
   it("request throws a backend reachability error when fetch fails", async () => {
     mockFetch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
 

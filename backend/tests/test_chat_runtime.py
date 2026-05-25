@@ -35,6 +35,51 @@ def test_default_settings_seed_dj_model_empty():
     assert DEFAULT_SETTINGS["dj_model"] == ""
 
 
+def test_chat_runtime_for_trtllm_model():
+    from bangers.model_registry import chat_runtime_for
+
+    assert chat_runtime_for("Qwen3-8B-NVFP4") == "trtllm"
+
+
+@pytest.mark.asyncio
+async def test_trtllm_chat_checks_health_then_chat_completion(monkeypatch, tmp_path):
+    from bangers.config import settings
+    from bangers.services.llm_provider import TrtLlmChatRuntime
+
+    settings.ACESTEP_PROJECT_ROOT = str(tmp_path)
+    model_dir = tmp_path / "chat-llm" / "Qwen3-8B-NVFP4"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    runtime = TrtLlmChatRuntime()
+    calls: list[dict] = []
+
+    def fake_request_json(model_name, path, *, method="GET", payload=None):
+        calls.append({
+            "model_name": model_name,
+            "path": path,
+            "method": method,
+            "payload": payload,
+        })
+        if path == "/health":
+            return {"status": "ok"}
+        return {"choices": [{"message": {"content": "OK"}}]}
+
+    monkeypatch.setattr(runtime, "_request_json", fake_request_json)
+
+    result = await runtime.chat(
+        [{"role": "user", "content": "ping"}],
+        "Qwen3-8B-NVFP4",
+        max_tokens=4,
+    )
+
+    assert result == "OK"
+    assert [call["path"] for call in calls] == ["/health", "/v1/chat/completions"]
+    assert calls[1]["method"] == "POST"
+    assert calls[1]["payload"]["model"] == "Qwen3-8B-NVFP4"
+    assert runtime.loaded_model_name() == "Qwen3-8B-NVFP4"
+
+
 @pytest.mark.asyncio
 async def test_mlx_chat_defers_while_music_gpu_lock_is_held(monkeypatch):
     from bangers.services.gpu_lock import gpu_lock

@@ -32,6 +32,7 @@ from bangers.models.common import (
 from bangers.services.generation import generation_service
 from bangers.services.chat_llm import (
     ChatLlmUnavailable,
+    TrtLlmServerUnavailable,
     get_loaded_chat_model_name,
     switch_chat_model,
 )
@@ -95,6 +96,8 @@ def _scan_checkpoints(loaded_chat_llm: str = "") -> ModelsResponse:
         for entry in sorted(chat_llm_dir.iterdir()):
             if entry.is_dir() and (entry / "config.json").exists():
                 name = entry.name
+                if name not in CHAT_LLM_REGISTRY:
+                    continue
                 chat_llm_models.append(ModelInfo(
                     name=name,
                     model_type="chat_llm",
@@ -149,9 +152,20 @@ def _download_progress_fs(repo_id: str, model_dir: Path, expected_mb: int) -> fl
 
 def _chat_llm_runtime_supported(model_name: str) -> bool:
     runtimes = CHAT_LLM_COMPATIBILITY.get(model_name, ())
+    if "trtllm" in runtimes:
+        return sys.platform.startswith("linux")
     if "mlx" in runtimes:
         return sys.platform == "darwin"
     return True
+
+
+def _chat_llm_runtime_requirement(model_name: str) -> str:
+    runtimes = CHAT_LLM_COMPATIBILITY.get(model_name, ())
+    if "trtllm" in runtimes:
+        return f"{model_name} requires TensorRT-LLM on NVIDIA Linux."
+    if "mlx" in runtimes:
+        return f"{model_name} requires MLX on macOS."
+    return f"{model_name} requires a supported chat runtime."
 
 
 @router.get("/models/available", response_model=AvailableModelsResponse)
@@ -240,7 +254,7 @@ async def download_model(request: DownloadModelRequest, background_tasks: Backgr
     if is_chat_llm and not _chat_llm_runtime_supported(model_name):
         raise HTTPException(
             status_code=400,
-            detail=f"{model_name} requires MLX on macOS.",
+            detail=_chat_llm_runtime_requirement(model_name),
         )
     if not (is_chat_llm or is_ace_main or is_ace_solo):
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
@@ -403,7 +417,7 @@ async def switch_chat_llm_model(request: SwitchModelRequest) -> dict[str, str]:
     if not _chat_llm_runtime_supported(model_name):
         raise HTTPException(
             status_code=400,
-            detail=f"{model_name} requires MLX on macOS.",
+            detail=_chat_llm_runtime_requirement(model_name),
         )
 
     _reject_if_loading(model_name)
@@ -417,6 +431,15 @@ async def switch_chat_llm_model(request: SwitchModelRequest) -> dict[str, str]:
             detail={
                 "error": "chat_llm_busy",
                 "message": str(exc),
+            },
+        ) from exc
+    except TrtLlmServerUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "trtllm_server_unavailable",
+                "message": str(exc),
+                "command": exc.command,
             },
         ) from exc
     except ChatLlmUnavailable as exc:

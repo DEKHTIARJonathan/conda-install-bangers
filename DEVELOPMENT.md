@@ -47,6 +47,8 @@ This deletes `BANGERS_DATA_DIR` (`backend/data/` by default), then recreates `au
 mise run dev
 ```
 
+This is app-only: it starts the backend and frontend, but no external TRT-LLM server.
+
 The launcher starts:
 
 - backend: `https://localhost:8000`
@@ -54,6 +56,15 @@ The launcher starts:
 - LAN frontend, when a LAN IP is detected: `https://<ip>:3000`
 
 It also writes combined runtime output to `runtime.log`.
+
+For external TensorRT-LLM FP4 chat, use two terminals:
+
+```bash
+mise run trtllm:qwen3-8b-nvfp4
+mise run dev:with-trt
+```
+
+The TRT-LLM tasks run `sudo docker run` with `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc1`, mount the matching `.cache/models/chat-llm/<model>` directory read-only, and expose an OpenAI-compatible server on `http://127.0.0.1:8010`. Available tasks are `trtllm:qwen3-8b-nvfp4`, `trtllm:qwen3-14b-nvfp4`, and `trtllm:qwen3-30b-fp4`. Stop the current TRT server before starting another one because all tasks use port `8010`.
 
 You can run the launcher directly after setup:
 
@@ -84,6 +95,8 @@ The backend starts with no active models. Open **Models** in the running app and
 
 Selections are persisted in `backend/data/conda-install-bangers.db` and restored on restart. There are no environment variables for preselecting models.
 
+Switching to a TensorRT-LLM chat model requires the matching external server to already be running. The backend verifies local model files, checks `/health`, sends a warmup request to `/v1/chat/completions`, and only then saves `dj_model`. A failed switch returns the exact `mise run trtllm:<model>` command to start. Keep only one chat model resident by default: either an embedded FP8 Transformers model or an external FP4 TRT-LLM server.
+
 ## Cache Paths
 
 Default local paths:
@@ -94,6 +107,9 @@ BANGERS_MODEL_CACHE_DIR=./.cache/models
 ACESTEP_PROJECT_ROOT=./.cache/models
 HF_HOME=./.cache/models/huggingface
 HF_HUB_CACHE=./.cache/models/huggingface/hub
+BANGERS_TRTLLM_MANAGED=false
+BANGERS_TRTLLM_SERVER_URL=http://127.0.0.1:8010
+BANGERS_TRTLLM_TIMEOUT_SECONDS=120
 ```
 
 Use another disk by exporting paths before setup/dev:
